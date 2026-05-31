@@ -22,11 +22,11 @@ DEFAULT_CONFIG = {
     "startup_delay": 8,
     "video_mode": "1080p2500",
     "channels": [
-        {"number": 1, "name": "GFX1",   "ndi_name": "PCR3 GFX1",   "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX1"},
-        {"number": 2, "name": "GFX2",   "ndi_name": "PCR3 GFX2",   "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX2"},
-        {"number": 3, "name": "GFX3",   "ndi_name": "PCR3 GFX3",   "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX3"},
-        {"number": 4, "name": "GFX4",   "ndi_name": "PCR3 GFX4",   "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX4"},
-        {"number": 5, "name": "GFXPVW", "ndi_name": "PCR3 GFXPVW", "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFXPVW"},
+        {"number": 1, "name": "GFX1",   "ndi_name": "PCR3 GFX1",   "type": "html", "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX1",   "startup_command": ""},
+        {"number": 2, "name": "GFX2",   "ndi_name": "PCR3 GFX2",   "type": "html", "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX2",   "startup_command": ""},
+        {"number": 3, "name": "GFX3",   "ndi_name": "PCR3 GFX3",   "type": "html", "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX3",   "startup_command": ""},
+        {"number": 4, "name": "GFX4",   "ndi_name": "PCR3 GFX4",   "type": "html", "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX4",   "startup_command": ""},
+        {"number": 5, "name": "GFXPVW", "ndi_name": "PCR3 GFXPVW", "type": "html", "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFXPVW", "startup_command": ""},
     ],
 }
 
@@ -44,8 +44,14 @@ def load() -> dict:
             stored = json.load(f)
         config = dict(DEFAULT_CONFIG)
         config.update(stored)
-        return config
-    return dict(DEFAULT_CONFIG)
+    else:
+        config = dict(DEFAULT_CONFIG)
+    # Backfill new fields on older configs
+    for ch in config.get("channels", []):
+        ch.setdefault("type", "html")
+        ch.setdefault("startup_command", "")
+        ch.setdefault("url", "")
+    return config
 
 
 def save(config: dict) -> None:

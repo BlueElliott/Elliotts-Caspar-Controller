@@ -341,10 +341,22 @@ def api_status():
             "number": ch["number"],
             "name": ch["name"],
             "ndi_name": ch["ndi_name"],
-            "url": ch["url"],
+            "type": ch.get("type", "html"),
+            "url": ch.get("url", ""),
+            "startup_command": ch.get("startup_command", ""),
             "status": "live" if (running and not info.startswith("ERROR")) else "stopped",
         })
     return {"running": running, "version": __version__, "channels": channels}
+
+
+def _load_channel(ch: dict, client: AMCPClient) -> str:
+    """Send the correct startup command for a channel based on its type."""
+    ch_type = ch.get("type", "html")
+    n = ch["number"]
+    if ch_type == "html":
+        return client.play_html(n, ch.get("url", ""))
+    cmd = ch.get("startup_command", "").strip()
+    return client.send(cmd) if cmd else client.send(f"CLEAR {n}")
 
 
 @app.post("/api/server/start")
@@ -356,8 +368,8 @@ def api_server_start():
         cfg = load_config()
         client = AMCPClient(port=cfg["amcp_port"])
         for ch in cfg["channels"]:
-            res = client.play_html(ch["number"], ch["url"])
-            _log_event(f"CH{ch['number']} PLAY -> {res[:60]}")
+            res = _load_channel(ch, client)
+            _log_event(f"CH{ch['number']} ({ch['name']}) load -> {res[:60]}")
         _log_event("CasparCG started and channels loaded.")
         return {"ok": True, "message": "CasparCG started"}
     _log_event("CasparCG failed to start.")
@@ -382,7 +394,7 @@ def api_channel_restart(number: int):
     client = AMCPClient(port=cfg["amcp_port"])
     client.stop_channel(number)
     time.sleep(0.5)
-    res = client.play_html(number, ch["url"])
+    res = _load_channel(ch, client)
     _log_event(f"CH{number} ({ch['name']}) restarted -> {res[:60]}")
     return {"ok": True, "response": res}
 
@@ -395,10 +407,23 @@ def api_channel_restart_all():
     for ch in cfg["channels"]:
         client.stop_channel(ch["number"])
         time.sleep(0.3)
-        res = client.play_html(ch["number"], ch["url"])
+        res = _load_channel(ch, client)
         _log_event(f"CH{ch['number']} restarted -> {res[:60]}")
         results.append({"number": ch["number"], "response": res})
     return {"ok": True, "results": results}
+
+
+class AMCPCommandRequest(BaseModel):
+    command: str
+
+
+@app.post("/api/channel/{number}/amcp")
+def api_channel_amcp(number: int, req: AMCPCommandRequest):
+    cfg = load_config()
+    client = AMCPClient(port=cfg["amcp_port"])
+    res = client.send(req.command.strip())
+    _log_event(f"CH{number} AMCP: {req.command[:60]} -> {res[:60]}")
+    return {"ok": True, "response": res}
 
 
 @app.get("/api/config")
@@ -410,6 +435,10 @@ def api_config_get():
 def api_config_post(update: ConfigUpdate):
     cfg = load_config()
     data = update.model_dump(exclude_none=True)
+    # Renumber channels by array order so the web UI can reorder freely
+    if "channels" in data:
+        for i, ch in enumerate(data["channels"], start=1):
+            ch["number"] = i
     cfg.update(data)
     save_config(cfg)
     regenerate_caspar_config(cfg)
@@ -464,7 +493,7 @@ def page_dashboard():
   </div>
 </div>
 
-<div class="grid-5" id="channel-grid" style="margin-bottom:16px"></div>
+<div id="channel-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px"></div>
 
 <div class="card">
   <h3 style="margin-bottom:10px">Event Log</h3>
@@ -476,33 +505,49 @@ let lastRunning = null;
 
 function renderChannels(channels) {
   const g = document.getElementById('channel-grid');
-  g.innerHTML = channels.map(ch => `
+  g.innerHTML = channels.map(ch => {
+    const isHtml  = ch.type === 'html' || !ch.type;
+    const typeBadge = isHtml
+      ? '<span class="badge badge-neutral" style="font-size:10px">HTML5</span>'
+      : '<span class="badge badge-warning" style="font-size:10px">Media</span>';
+    const sourceInfo = isHtml
+      ? `<div class="ch-ndi" title="${ch.url}" style="word-break:break-all;font-size:11px">${ch.url ? ch.url.replace(/^https?:\\/\\//, '').substring(0,45)+(ch.url.length>52?'...':'') : '(no url)'}</div>`
+      : `<div class="ch-ndi" style="color:var(--warning);font-size:11px">${ch.startup_command || '(no startup command)'}</div>`;
+    const amcpRow = !isHtml ? `
+      <div style="display:flex;gap:4px;margin-top:4px">
+        <input type="text" id="amcp_${ch.number}" placeholder="PLAY ${ch.number}-1 CLIP LOOP"
+               style="flex:1;font-size:11px;padding:5px 8px;min-width:0">
+        <button class="btn btn-secondary btn-sm" style="padding:0 10px;flex-shrink:0"
+                onclick="sendAmcp(${ch.number})">Send</button>
+      </div>` : '';
+    return `
     <div class="channel-card">
-      <div class="ch-num">Channel ${ch.number}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div class="ch-num">Channel ${ch.number}</div>
+        ${typeBadge}
+      </div>
       <div class="ch-name">${ch.name}</div>
       <div class="ch-ndi">NDI: ${ch.ndi_name}</div>
+      ${sourceInfo}
       <span class="badge ${ch.status === 'live' ? 'badge-success' : 'badge-error'}">${ch.status}</span>
       <button class="btn btn-danger btn-sm" onclick="restartChannel(${ch.number}, '${ch.name}')">Restart</button>
-    </div>
-  `).join('');
+      ${amcpRow}
+    </div>`;
+  }).join('');
 }
 
 function updateStatus() {
   api('/api/status').then(data => {
     const running = data.running;
-    const p = document.getElementById('pulse');
-    const lbl = document.getElementById('server-status-label');
-    p.className = 'pulse ' + (running ? 'pulse-green' : 'pulse-red');
-    lbl.textContent = running ? 'CasparCG Running' : 'CasparCG Stopped';
+    document.getElementById('pulse').className = 'pulse ' + (running ? 'pulse-green' : 'pulse-red');
+    document.getElementById('server-status-label').textContent = running ? 'CasparCG Running' : 'CasparCG Stopped';
     renderChannels(data.channels);
-    if (lastRunning !== null && lastRunning !== running) {
+    if (lastRunning !== null && lastRunning !== running)
       toast(running ? 'CasparCG is now running' : 'CasparCG stopped', running ? 'success' : 'warning');
-    }
     lastRunning = running;
   });
   api('/api/log').then(data => {
-    const box = document.getElementById('log-box');
-    box.innerHTML = data.log.slice().reverse().map(l => `<p>${l}</p>`).join('');
+    document.getElementById('log-box').innerHTML = data.log.slice().reverse().map(l => `<p>${l}</p>`).join('');
   });
 }
 
@@ -530,6 +575,15 @@ function restartAll() {
   }).catch(() => toast('Failed', 'error'));
 }
 
+function sendAmcp(n) {
+  const input = document.getElementById('amcp_' + n);
+  const cmd = input.value.trim();
+  if (!cmd) { toast('Enter an AMCP command first', 'warning'); return; }
+  api('/api/channel/' + n + '/amcp', 'POST', { command: cmd }).then(d => {
+    toast('CH' + n + ': ' + (d.response || 'OK'), 'success');
+  }).catch(() => toast('Failed to send AMCP', 'error'));
+}
+
 updateStatus();
 setInterval(updateStatus, 4000);
 """
@@ -539,8 +593,9 @@ setInterval(updateStatus, 4000);
 @app.get("/multiviewer", response_class=HTMLResponse)
 def page_multiviewer():
     cfg = load_config()
+    html_channels = [ch for ch in cfg["channels"] if ch.get("type", "html") == "html" and ch.get("url")]
     frames = ""
-    for ch in cfg["channels"]:
+    for ch in html_channels:
         frames += f"""
 <div class="mv-frame">
   <iframe id="frame-{ch['number']}" src="{ch['url']}" title="{ch['name']}" allow="autoplay"></iframe>
@@ -550,11 +605,19 @@ def page_multiviewer():
   </div>
 </div>"""
 
+    no_preview = ""
+    media_channels = [ch for ch in cfg["channels"] if ch.get("type") == "media"]
+    if media_channels:
+        no_preview = "<div class='card' style='margin-top:16px'><h3 style='margin-bottom:8px'>Media Channels (no preview)</h3>"
+        no_preview += "".join(f"<div style='color:var(--muted);padding:4px 0'>CH{ch['number']} — {ch['name']}: {ch.get('startup_command','(no startup command)')}</div>" for ch in media_channels)
+        no_preview += "</div>"
+
     body = f"""
-<p style="color:var(--muted);margin-bottom:16px">Live preview of all Singular.live outputs. Reload a frame if it gets stuck.</p>
+<p style="color:var(--muted);margin-bottom:16px">Live preview of HTML5 outputs. Reload a frame if it gets stuck.</p>
 <div class="mv-grid">
 {frames}
 </div>
+{no_preview}
 """
     js = """
 function reloadFrame(n) {
@@ -580,7 +643,7 @@ def page_settings():
     <button class="btn btn-primary" onclick="saveExePath()" style="flex-shrink:0">Save Path</button>
   </div>
   <p style="color:var(--muted);font-size:12px;margin-top:8px">
-    The config file (<code>casparcg.config</code>) will be written to the same folder as the exe when you start CasparCG.
+    <code>casparcg.config</code> is written to the same folder as the exe each time CasparCG is started.
   </p>
 </div>
 
@@ -588,7 +651,7 @@ def page_settings():
 <div class="card" style="margin-bottom:16px">
   <h2 style="margin-bottom:12px">Import Existing casparcg.config</h2>
   <p style="color:var(--muted);font-size:13px;margin-bottom:12px">
-    Point to an existing <code>casparcg.config</code> to import its video mode, AMCP port and NDI names.
+    Pull video mode, AMCP port and NDI names from an existing <code>casparcg.config</code>.
   </p>
   <div style="display:flex;gap:10px;align-items:flex-end">
     <div class="form-group" style="flex:1;margin:0">
@@ -600,7 +663,7 @@ def page_settings():
   <div id="import-result" style="margin-top:10px;display:none" class="badge badge-success"></div>
 </div>
 
-<!-- Main settings -->
+<!-- Output settings + channel editor -->
 <div class="card" id="settings-form">
   <h2 style="margin-bottom:16px">Output Settings</h2>
   <div class="grid-2">
@@ -628,16 +691,39 @@ def page_settings():
     </div>
   </div>
 
-  <h2 style="margin:20px 0 16px">Channels</h2>
-  <table>
-    <thead><tr><th>CH</th><th>Name</th><th>NDI Output Name</th><th>Singular.live URL</th></tr></thead>
-    <tbody id="channels-tbody"></tbody>
-  </table>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin:20px 0 12px">
+    <h2>Channels</h2>
+    <button class="btn btn-primary btn-sm" onclick="addChannel()">+ Add Channel</button>
+  </div>
+
+  <div style="overflow-x:auto">
+    <table style="table-layout:fixed;width:100%">
+      <colgroup>
+        <col style="width:60px">
+        <col style="width:28px">
+        <col style="width:90px">
+        <col style="width:110px">
+        <col style="width:160px">
+        <col style="width:auto">
+        <col style="width:30px">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Move</th><th>#</th><th>Type</th><th>Name</th>
+          <th>NDI Name</th><th>URL / Startup Command</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="channels-tbody"></tbody>
+    </table>
+  </div>
 
   <div style="display:flex;gap:10px;margin-top:20px">
     <button class="btn btn-primary" onclick="saveSettings()">Save & Regenerate Config</button>
     <button class="btn btn-secondary" onclick="loadSettings()">Reset</button>
   </div>
+  <p style="color:var(--muted);font-size:12px;margin-top:10px">
+    Channel order determines CasparCG channel numbers (top = CH1). Restart CasparCG after saving to apply changes.
+  </p>
 </div>
 """
     js = """
@@ -650,46 +736,116 @@ function loadSettings() {
     document.getElementById('amcp_port').value = cfg.amcp_port || 5250;
     document.getElementById('web_port').value = cfg.web_port || 5280;
     document.getElementById('startup_delay').value = cfg.startup_delay || 8;
-    currentChannels = cfg.channels || [];
+    currentChannels = (cfg.channels || []).map(ch => ({
+      ...ch,
+      type: ch.type || 'html',
+      startup_command: ch.startup_command || '',
+      url: ch.url || '',
+    }));
     renderChannelTable(currentChannels);
   });
 }
 
-function renderChannelTable(channels) {
-  const tbody = document.getElementById('channels-tbody');
-  tbody.innerHTML = channels.map((ch, i) => `
-    <tr>
-      <td>${ch.number}</td>
-      <td><input type="text" value="${ch.name}" id="ch_name_${i}" style="width:100px"></td>
-      <td><input type="text" value="${ch.ndi_name}" id="ch_ndi_${i}" style="width:180px"></td>
-      <td><input type="text" value="${ch.url}" id="ch_url_${i}"></td>
-    </tr>
-  `).join('');
+function renderChannelTable(chs) {
+  const last = chs.length - 1;
+  document.getElementById('channels-tbody').innerHTML = chs.map((ch, i) => {
+    const isHtml = (ch.type || 'html') === 'html';
+    return `<tr>
+      <td style="white-space:nowrap">
+        <button class="btn btn-secondary btn-sm" style="padding:0 8px" ${i===0?'disabled':''} onclick="moveUp(${i})">▲</button>
+        <button class="btn btn-secondary btn-sm" style="padding:0 8px" ${i===last?'disabled':''} onclick="moveDown(${i})">▼</button>
+      </td>
+      <td style="color:var(--muted);text-align:center">${i+1}</td>
+      <td>
+        <select id="ch_type_${i}" onchange="toggleType(${i})" style="padding:6px 4px;font-size:13px">
+          <option value="html" ${isHtml?'selected':''}>HTML5</option>
+          <option value="media" ${!isHtml?'selected':''}>Media</option>
+        </select>
+      </td>
+      <td><input type="text" id="ch_name_${i}" value="${ch.name}"></td>
+      <td><input type="text" id="ch_ndi_${i}" value="${ch.ndi_name}"></td>
+      <td>
+        <input type="text" id="ch_url_${i}" value="${ch.url}"
+               placeholder="https://..." style="display:${isHtml?'block':'none'}">
+        <input type="text" id="ch_cmd_${i}" value="${ch.startup_command}"
+               placeholder="PLAY ${i+1}-1 CLIP LOOP" style="display:${!isHtml?'block':'none'}">
+      </td>
+      <td>
+        <button class="btn btn-danger btn-sm" style="padding:0 8px" onclick="deleteChannel(${i})"
+                title="Delete">×</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function toggleType(i) {
+  const isHtml = document.getElementById('ch_type_' + i).value === 'html';
+  document.getElementById('ch_url_' + i).style.display = isHtml ? '' : 'none';
+  document.getElementById('ch_cmd_' + i).style.display = isHtml ? 'none' : '';
+}
+
+function getFormChannels() {
+  return currentChannels.map((ch, i) => ({
+    ...ch,
+    name:            document.getElementById('ch_name_' + i)?.value ?? ch.name,
+    ndi_name:        document.getElementById('ch_ndi_' + i)?.value ?? ch.ndi_name,
+    type:            document.getElementById('ch_type_' + i)?.value ?? ch.type,
+    url:             document.getElementById('ch_url_' + i)?.value ?? ch.url,
+    startup_command: document.getElementById('ch_cmd_' + i)?.value ?? ch.startup_command,
+  }));
+}
+
+function moveUp(i) {
+  if (i === 0) return;
+  currentChannels = getFormChannels();
+  [currentChannels[i-1], currentChannels[i]] = [currentChannels[i], currentChannels[i-1]];
+  renderChannelTable(currentChannels);
+}
+
+function moveDown(i) {
+  if (i >= currentChannels.length - 1) return;
+  currentChannels = getFormChannels();
+  [currentChannels[i], currentChannels[i+1]] = [currentChannels[i+1], currentChannels[i]];
+  renderChannelTable(currentChannels);
+}
+
+function addChannel() {
+  currentChannels = getFormChannels();
+  const n = currentChannels.length + 1;
+  currentChannels.push({ number: n, name: 'CH' + n, ndi_name: 'PCR3 CH' + n,
+                          type: 'html', url: '', startup_command: '' });
+  renderChannelTable(currentChannels);
+  toast('Channel added', 'success');
+}
+
+function deleteChannel(i) {
+  const name = currentChannels[i]?.name || ('CH' + (i+1));
+  if (!confirm('Delete channel "' + name + '"?')) return;
+  currentChannels = getFormChannels();
+  currentChannels.splice(i, 1);
+  renderChannelTable(currentChannels);
+  toast(name + ' deleted', 'warning');
 }
 
 function saveExePath() {
   const path = document.getElementById('caspar_exe_path').value.trim();
-  api('/api/config', 'POST', { caspar_exe_path: path }).then(() => {
-    toast('CasparCG path saved', 'success');
-  }).catch(() => toast('Failed to save path', 'error'));
+  api('/api/config', 'POST', { caspar_exe_path: path })
+    .then(() => toast('CasparCG path saved', 'success'))
+    .catch(() => toast('Failed to save path', 'error'));
 }
 
 function saveSettings() {
-  const channels = currentChannels.map((ch, i) => ({
-    number: ch.number,
-    name: document.getElementById('ch_name_' + i).value,
-    ndi_name: document.getElementById('ch_ndi_' + i).value,
-    url: document.getElementById('ch_url_' + i).value,
-  }));
+  const channels = getFormChannels();
   const payload = {
-    video_mode: document.getElementById('video_mode').value,
-    amcp_port: parseInt(document.getElementById('amcp_port').value),
-    web_port: parseInt(document.getElementById('web_port').value),
+    video_mode:    document.getElementById('video_mode').value,
+    amcp_port:     parseInt(document.getElementById('amcp_port').value),
+    web_port:      parseInt(document.getElementById('web_port').value),
     startup_delay: parseInt(document.getElementById('startup_delay').value),
     channels,
   };
   api('/api/config', 'POST', payload).then(() => {
-    toast('Settings saved and casparcg.config regenerated', 'success');
+    currentChannels = channels;
+    toast('Settings saved — restart CasparCG to apply', 'success');
   }).catch(() => toast('Failed to save settings', 'error'));
 }
 
@@ -699,9 +855,9 @@ function importConfig() {
   toast('Importing...', 'info');
   api('/api/config/import', 'POST', { path }).then(d => {
     const res = document.getElementById('import-result');
-    res.textContent = `Imported — video mode: ${d.video_mode}, AMCP port: ${d.amcp_port}`;
+    res.textContent = 'Imported — video mode: ' + d.video_mode + ', AMCP port: ' + d.amcp_port;
     res.style.display = 'inline-block';
-    toast('Config imported successfully', 'success');
+    toast('Config imported', 'success');
     loadSettings();
   }).catch(e => toast('Import failed: ' + (e.detail || e), 'error'));
 }

@@ -632,7 +632,7 @@ class CasperControllerGUI:
                 if ok:
                     client = AMCPClient(port=cfg["amcp_port"])
                     for ch in cfg["channels"]:
-                        res = client.play_html(ch["number"], ch["url"])
+                        res = self._send_channel_load(ch, client)
                         self._log_to_console(f"CH{ch['number']} ({ch['name']}) -> {res[:60]}")
                     self.root.after(0, self._on_caspar_started)
                 else:
@@ -704,6 +704,14 @@ class CasperControllerGUI:
     # Channel restart
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _send_channel_load(ch: dict, client: AMCPClient) -> str:
+        n = ch["number"]
+        if ch.get("type", "html") == "html":
+            return client.play_html(n, ch.get("url", ""))
+        cmd = ch.get("startup_command", "").strip()
+        return client.send(cmd) if cmd else client.send(f"CLEAR {n}")
+
     def _restart_ch(self, number: int, name: str):
         def run():
             cfg = load_config()
@@ -714,7 +722,7 @@ class CasperControllerGUI:
             client = AMCPClient(port=cfg["amcp_port"])
             client.stop_channel(number)
             time.sleep(0.5)
-            res = client.play_html(number, ch["url"])
+            res = self._send_channel_load(ch, client)
             self._log_to_console(f"CH{number} ({name}) restarted -> {res[:60]}")
 
         threading.Thread(target=run, daemon=True).start()
@@ -726,7 +734,7 @@ class CasperControllerGUI:
             for ch in cfg["channels"]:
                 client.stop_channel(ch["number"])
                 time.sleep(0.3)
-                res = client.play_html(ch["number"], ch["url"])
+                res = self._send_channel_load(ch, client)
                 self._log_to_console(f"CH{ch['number']} restarted -> {res[:60]}")
 
         threading.Thread(target=run, daemon=True).start()
