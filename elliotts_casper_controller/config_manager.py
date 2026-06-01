@@ -21,6 +21,7 @@ DEFAULT_CONFIG = {
     "web_port": 5280,
     "startup_delay": 8,
     "video_mode": "1080p2500",
+    "autostart_caspar": False,
     "channels": [
         {"number": 1, "name": "GFX1",   "ndi_name": "PCR3 GFX1",   "type": "html", "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX1",   "startup_command": ""},
         {"number": 2, "name": "GFX2",   "ndi_name": "PCR3 GFX2",   "type": "html", "url": "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1=GFX2",   "startup_command": ""},
@@ -46,7 +47,9 @@ def load() -> dict:
         config.update(stored)
     else:
         config = dict(DEFAULT_CONFIG)
-    # Backfill new fields on older configs
+    # Backfill new top-level fields on older configs
+    config.setdefault("autostart_caspar", False)
+    # Backfill per-channel fields
     for ch in config.get("channels", []):
         ch.setdefault("type", "html")
         ch.setdefault("startup_command", "")

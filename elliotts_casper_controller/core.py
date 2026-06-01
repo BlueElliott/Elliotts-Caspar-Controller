@@ -201,7 +201,22 @@ label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px
 .toast-info    { border-color: var(--accent);  }
 @keyframes slide-in { from { transform: translateX(110%); } to { transform: translateX(0); } }
 
-/* CHANNEL CARD */
+/* CHANNEL EDIT CARD (settings page) */
+.ch-edit-card {
+  background: var(--input-bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
+}
+.ch-edit-card .ch-edit-top {
+  display: flex; gap: 8px; align-items: center; flex-wrap: nowrap;
+}
+.ch-edit-card .ch-edit-source {
+  margin-top: 6px; padding-left: 78px;
+}
+.ch-edit-card input, .ch-edit-card select {
+  padding: 7px 10px; font-size: 13px;
+}
+
+/* CHANNEL CARD (dashboard) */
 .channel-card {
   background: var(--card); border: 1px solid var(--border);
   border-radius: 12px; padding: 16px; display: flex;
@@ -326,6 +341,7 @@ class ConfigUpdate(BaseModel):
     web_port: Optional[int] = None
     startup_delay: Optional[int] = None
     video_mode: Optional[str] = None
+    autostart_caspar: Optional[bool] = None
     channels: Optional[list] = None
 
 
@@ -426,6 +442,66 @@ def api_channel_amcp(number: int, req: AMCPCommandRequest):
     return {"ok": True, "response": res}
 
 
+@app.get("/api/channel/{number}/preview")
+def api_channel_preview(number: int):
+    """Capture a live snapshot of a CasparCG channel via AMCP PRINT and return it as PNG."""
+    import glob
+    from fastapi.responses import FileResponse, Response
+    cfg = load_config()
+    exe = cfg.get("caspar_exe_path", "")
+    if not exe or not os.path.isfile(exe):
+        raise HTTPException(status_code=503, detail="CasparCG exe not configured")
+    exe_dir = os.path.dirname(os.path.abspath(exe))
+    client = AMCPClient(port=cfg["amcp_port"])
+    if not client.ping():
+        raise HTTPException(status_code=503, detail="CasparCG not running")
+    client.send(f"PRINT {number}")
+    time.sleep(0.6)  # wait for CasparCG to write the file
+    # CasparCG saves PRINT output to various locations depending on version
+    candidates = [
+        os.path.join(exe_dir, f"{number}.png"),
+        os.path.join(exe_dir, "thumbnails", f"{number}.png"),
+        os.path.join(exe_dir, "log", f"{number}.png"),
+        os.path.join(exe_dir, "data", f"{number}.png"),
+    ]
+    # Also pick up the most recently written PNG anywhere one level deep
+    recent = sorted(
+        glob.glob(os.path.join(exe_dir, "*.png")) +
+        glob.glob(os.path.join(exe_dir, "*", "*.png")),
+        key=os.path.getmtime, reverse=True,
+    )
+    if recent:
+        candidates.insert(0, recent[0])
+    for path in candidates:
+        if os.path.isfile(path):
+            return FileResponse(path, media_type="image/png",
+                                headers={"Cache-Control": "no-store, no-cache"})
+    raise HTTPException(status_code=404, detail="Snapshot not available — PRINT may not be supported by this CasparCG build")
+
+
+@app.get("/api/media")
+def api_media():
+    """List clip names from CasparCG's media folder (relative paths, no extension)."""
+    cfg = load_config()
+    exe = cfg.get("caspar_exe_path", "")
+    if not exe or not os.path.isfile(exe):
+        return {"clips": [], "error": "CasparCG exe path not set"}
+    media_dir = os.path.join(os.path.dirname(exe), "media")
+    if not os.path.isdir(media_dir):
+        return {"clips": [], "error": f"Media folder not found: {media_dir}"}
+    MEDIA_EXTS = {".mp4", ".mov", ".avi", ".mxf", ".mkv", ".wmv", ".flv",
+                  ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".gif"}
+    clips = []
+    for root, _, files in os.walk(media_dir):
+        for fname in sorted(files):
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in MEDIA_EXTS:
+                rel = os.path.relpath(os.path.join(root, fname), media_dir)
+                clip_name = os.path.splitext(rel)[0].replace(os.sep, "/").upper()
+                clips.append(clip_name)
+    return {"clips": sorted(clips), "media_dir": media_dir}
+
+
 @app.get("/api/config")
 def api_config_get():
     return load_config()
@@ -487,7 +563,7 @@ def page_dashboard():
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-success" onclick="serverAction('start')">Start CasparCG</button>
-      <button class="btn btn-danger btn-sm" onclick="serverAction('stop')">Stop</button>
+      <button class="btn btn-danger" onclick="serverAction('stop')">Stop CasparCG</button>
       <button class="btn btn-warning" onclick="restartAll()">Restart All Channels</button>
     </div>
   </div>
@@ -503,6 +579,27 @@ def page_dashboard():
     js = """
 let lastRunning = null;
 
+let _mediaClips = [];
+
+function loadMediaClips() {
+  api('/api/media').then(data => {
+    _mediaClips = data.clips || [];
+    document.querySelectorAll('[id^="media_"]').forEach(sel => {
+      const ch = sel.id.split('_')[1];
+      const current = sel.value;
+      sel.innerHTML = '<option value="">— pick a clip —</option>' +
+        _mediaClips.map(c => `<option value="${c}"${c===current?' selected':''}>${c}</option>`).join('');
+    });
+  });
+}
+
+function onMediaSelect(n) {
+  const sel = document.getElementById('media_' + n);
+  const clip = sel.value;
+  if (!clip) return;
+  document.getElementById('amcp_' + n).value = `PLAY ${n}-1 "${clip}" LOOP`;
+}
+
 function renderChannels(channels) {
   const g = document.getElementById('channel-grid');
   g.innerHTML = channels.map(ch => {
@@ -514,6 +611,13 @@ function renderChannels(channels) {
       ? `<div class="ch-ndi" title="${ch.url}" style="word-break:break-all;font-size:11px">${ch.url ? ch.url.replace(/^https?:\\/\\//, '').substring(0,45)+(ch.url.length>52?'...':'') : '(no url)'}</div>`
       : `<div class="ch-ndi" style="color:var(--warning);font-size:11px">${ch.startup_command || '(no startup command)'}</div>`;
     const amcpRow = !isHtml ? `
+      <div style="display:flex;gap:4px;margin-top:4px">
+        <select id="media_${ch.number}"
+                style="flex:1;font-size:11px;padding:5px 8px;min-width:0;background:var(--input-bg);color:var(--muted);border:1px solid var(--border);border-radius:6px"
+                onchange="onMediaSelect(${ch.number})">
+          <option value="">— pick a clip —</option>
+        </select>
+      </div>
       <div style="display:flex;gap:4px;margin-top:4px">
         <input type="text" id="amcp_${ch.number}" placeholder="PLAY ${ch.number}-1 CLIP LOOP"
                style="flex:1;font-size:11px;padding:5px 8px;min-width:0">
@@ -542,6 +646,7 @@ function updateStatus() {
     document.getElementById('pulse').className = 'pulse ' + (running ? 'pulse-green' : 'pulse-red');
     document.getElementById('server-status-label').textContent = running ? 'CasparCG Running' : 'CasparCG Stopped';
     renderChannels(data.channels);
+    loadMediaClips();
     if (lastRunning !== null && lastRunning !== running)
       toast(running ? 'CasparCG is now running' : 'CasparCG stopped', running ? 'success' : 'warning');
     lastRunning = running;
@@ -593,38 +698,77 @@ setInterval(updateStatus, 4000);
 @app.get("/multiviewer", response_class=HTMLResponse)
 def page_multiviewer():
     cfg = load_config()
-    html_channels = [ch for ch in cfg["channels"] if ch.get("type", "html") == "html" and ch.get("url")]
+    channels = cfg["channels"]
     frames = ""
-    for ch in html_channels:
+    for ch in channels:
+        type_badge = (
+            '<span class="badge badge-neutral" style="font-size:10px">HTML5</span>'
+            if ch.get("type", "html") == "html"
+            else '<span class="badge badge-warning" style="font-size:10px">Media</span>'
+        )
         frames += f"""
 <div class="mv-frame">
-  <iframe id="frame-{ch['number']}" src="{ch['url']}" title="{ch['name']}" allow="autoplay"></iframe>
+  <div style="position:relative;background:#000;height:180px;display:flex;align-items:center;justify-content:center">
+    <img id="snap-{ch['number']}" src="/api/channel/{ch['number']}/preview?t=0"
+         style="max-width:100%;max-height:180px;object-fit:contain;display:block"
+         onerror="this.style.display='none';document.getElementById('snap-err-{ch['number']}').style.display='flex'"
+         onload="this.style.display='block';document.getElementById('snap-err-{ch['number']}').style.display='none'">
+    <div id="snap-err-{ch['number']}" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;flex-direction:column;gap:6px;color:var(--muted);font-size:12px">
+      <span style="font-size:28px">📷</span>
+      <span>No snapshot — CasparCG running?</span>
+    </div>
+  </div>
   <div class="mv-label">
-    <span>CH{ch['number']} — {ch['name']}</span>
-    <button class="btn btn-secondary btn-sm" onclick="reloadFrame({ch['number']})">Reload</button>
+    <span>CH{ch['number']} — {ch['name']} &nbsp;{type_badge}</span>
+    <button class="btn btn-secondary btn-sm" onclick="refreshSnap({ch['number']})">Refresh</button>
   </div>
 </div>"""
 
-    no_preview = ""
-    media_channels = [ch for ch in cfg["channels"] if ch.get("type") == "media"]
-    if media_channels:
-        no_preview = "<div class='card' style='margin-top:16px'><h3 style='margin-bottom:8px'>Media Channels (no preview)</h3>"
-        no_preview += "".join(f"<div style='color:var(--muted);padding:4px 0'>CH{ch['number']} — {ch['name']}: {ch.get('startup_command','(no startup command)')}</div>" for ch in media_channels)
-        no_preview += "</div>"
-
     body = f"""
-<p style="color:var(--muted);margin-bottom:16px">Live preview of HTML5 outputs. Reload a frame if it gets stuck.</p>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+  <p style="color:var(--muted);margin:0">Live snapshots via CasparCG PRINT — all channel types supported.</p>
+  <div style="display:flex;align-items:center;gap:12px">
+    <label style="color:var(--muted);font-size:13px;margin:0">
+      Refresh every
+      <select id="refresh-interval" onchange="setRefreshInterval()"
+              style="width:auto;display:inline;padding:4px 8px;margin-left:4px">
+        <option value="0">Manual</option>
+        <option value="3000">3s</option>
+        <option value="5000" selected>5s</option>
+        <option value="10000">10s</option>
+        <option value="30000">30s</option>
+      </select>
+    </label>
+    <button class="btn btn-primary btn-sm" onclick="refreshAll()">Refresh All</button>
+  </div>
+</div>
 <div class="mv-grid">
 {frames}
 </div>
-{no_preview}
 """
     js = """
-function reloadFrame(n) {
-  const f = document.getElementById('frame-' + n);
-  f.src = f.src;
-  toast('Frame ' + n + ' reloaded', 'info');
+let _refreshTimer = null;
+
+function refreshSnap(n) {
+  const img = document.getElementById('snap-' + n);
+  if (!img) return;
+  img.src = '/api/channel/' + n + '/preview?t=' + Date.now();
 }
+
+function refreshAll() {
+  document.querySelectorAll('[id^="snap-"]').forEach(img => {
+    const n = img.id.split('-')[1];
+    if (!isNaN(n)) img.src = '/api/channel/' + n + '/preview?t=' + Date.now();
+  });
+}
+
+function setRefreshInterval() {
+  clearInterval(_refreshTimer);
+  const ms = parseInt(document.getElementById('refresh-interval').value);
+  if (ms > 0) _refreshTimer = setInterval(refreshAll, ms);
+}
+
+setRefreshInterval();
 """
     return HTMLResponse(page("Multiviewer", "multiviewer", body, js))
 
@@ -689,37 +833,35 @@ def page_settings():
       <label>Startup Delay (seconds)</label>
       <input type="number" id="startup_delay" value="8" min="2" max="30">
     </div>
+    <div class="form-group" style="display:flex;align-items:center;gap:10px;padding-top:4px">
+      <input type="checkbox" id="autostart_caspar"
+             style="width:18px;height:18px;flex-shrink:0;accent-color:var(--accent);cursor:pointer">
+      <label for="autostart_caspar" style="margin:0;color:var(--text);cursor:pointer">
+        Auto-start CasparCG when the app launches
+      </label>
+    </div>
   </div>
 
-  <div style="display:flex;justify-content:space-between;align-items:center;margin:20px 0 12px">
-    <h2>Channels</h2>
+  <h2 style="margin:20px 0 8px">Channels</h2>
+
+  <!-- Column header row -->
+  <div style="display:flex;gap:8px;padding:0 12px 6px;color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">
+    <span style="width:48px;flex-shrink:0"></span>
+    <span style="width:18px;flex-shrink:0;text-align:center">#</span>
+    <span style="width:86px;flex-shrink:0">Type</span>
+    <span style="flex:0 0 110px">Name</span>
+    <span style="flex:0 0 160px">NDI Name</span>
+    <span style="flex:1">URL / Startup Command</span>
+  </div>
+
+  <div id="channels-tbody"></div>
+
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:20px">
+    <div style="display:flex;gap:10px">
+      <button class="btn btn-primary" onclick="saveSettings()">Save & Regenerate Config</button>
+      <button class="btn btn-secondary" onclick="loadSettings()">Reset</button>
+    </div>
     <button class="btn btn-primary btn-sm" onclick="addChannel()">+ Add Channel</button>
-  </div>
-
-  <div style="overflow-x:auto">
-    <table style="table-layout:fixed;width:100%">
-      <colgroup>
-        <col style="width:60px">
-        <col style="width:28px">
-        <col style="width:90px">
-        <col style="width:110px">
-        <col style="width:160px">
-        <col style="width:auto">
-        <col style="width:30px">
-      </colgroup>
-      <thead>
-        <tr>
-          <th>Move</th><th>#</th><th>Type</th><th>Name</th>
-          <th>NDI Name</th><th>URL / Startup Command</th><th></th>
-        </tr>
-      </thead>
-      <tbody id="channels-tbody"></tbody>
-    </table>
-  </div>
-
-  <div style="display:flex;gap:10px;margin-top:20px">
-    <button class="btn btn-primary" onclick="saveSettings()">Save & Regenerate Config</button>
-    <button class="btn btn-secondary" onclick="loadSettings()">Reset</button>
   </div>
   <p style="color:var(--muted);font-size:12px;margin-top:10px">
     Channel order determines CasparCG channel numbers (top = CH1). Restart CasparCG after saving to apply changes.
@@ -736,6 +878,7 @@ function loadSettings() {
     document.getElementById('amcp_port').value = cfg.amcp_port || 5250;
     document.getElementById('web_port').value = cfg.web_port || 5280;
     document.getElementById('startup_delay').value = cfg.startup_delay || 8;
+    document.getElementById('autostart_caspar').checked = !!cfg.autostart_caspar;
     currentChannels = (cfg.channels || []).map(ch => ({
       ...ch,
       type: ch.type || 'html',
@@ -750,31 +893,39 @@ function renderChannelTable(chs) {
   const last = chs.length - 1;
   document.getElementById('channels-tbody').innerHTML = chs.map((ch, i) => {
     const isHtml = (ch.type || 'html') === 'html';
-    return `<tr>
-      <td style="white-space:nowrap">
-        <button class="btn btn-secondary btn-sm" style="padding:0 8px" ${i===0?'disabled':''} onclick="moveUp(${i})">▲</button>
-        <button class="btn btn-secondary btn-sm" style="padding:0 8px" ${i===last?'disabled':''} onclick="moveDown(${i})">▼</button>
-      </td>
-      <td style="color:var(--muted);text-align:center">${i+1}</td>
-      <td>
-        <select id="ch_type_${i}" onchange="toggleType(${i})" style="padding:6px 4px;font-size:13px">
+    const urlVal = (ch.url || '').replace(/"/g, '&quot;');
+    const cmdVal = (ch.startup_command || '').replace(/"/g, '&quot;');
+    const nameVal = (ch.name || '').replace(/"/g, '&quot;');
+    const ndiVal  = (ch.ndi_name || '').replace(/"/g, '&quot;');
+    return `
+    <div class="ch-edit-card">
+      <div class="ch-edit-top">
+        <div style="flex-shrink:0;width:48px;display:flex;flex-direction:column;gap:3px">
+          <button class="btn btn-secondary btn-sm" style="height:22px;padding:0 8px;font-size:11px"
+                  ${i===0?'disabled':''} onclick="moveUp(${i})">▲</button>
+          <button class="btn btn-secondary btn-sm" style="height:22px;padding:0 8px;font-size:11px"
+                  ${i===last?'disabled':''} onclick="moveDown(${i})">▼</button>
+        </div>
+        <span style="flex-shrink:0;width:18px;text-align:center;color:var(--muted);font-size:12px">${i+1}</span>
+        <select id="ch_type_${i}" onchange="toggleType(${i})" style="flex-shrink:0;width:86px">
           <option value="html" ${isHtml?'selected':''}>HTML5</option>
           <option value="media" ${!isHtml?'selected':''}>Media</option>
         </select>
-      </td>
-      <td><input type="text" id="ch_name_${i}" value="${ch.name}"></td>
-      <td><input type="text" id="ch_ndi_${i}" value="${ch.ndi_name}"></td>
-      <td>
-        <input type="text" id="ch_url_${i}" value="${ch.url}"
-               placeholder="https://..." style="display:${isHtml?'block':'none'}">
-        <input type="text" id="ch_cmd_${i}" value="${ch.startup_command}"
-               placeholder="PLAY ${i+1}-1 CLIP LOOP" style="display:${!isHtml?'block':'none'}">
-      </td>
-      <td>
-        <button class="btn btn-danger btn-sm" style="padding:0 8px" onclick="deleteChannel(${i})"
-                title="Delete">×</button>
-      </td>
-    </tr>`;
+        <input type="text" id="ch_name_${i}" value="${nameVal}" placeholder="Name"
+               style="flex:0 0 110px;min-width:0">
+        <input type="text" id="ch_ndi_${i}" value="${ndiVal}" placeholder="NDI Name"
+               style="flex:0 0 160px;min-width:0">
+        <button class="btn btn-danger btn-sm" style="flex-shrink:0;padding:0 10px;margin-left:auto"
+                onclick="deleteChannel(${i})" title="Delete channel">×</button>
+      </div>
+      <div class="ch-edit-source">
+        <input type="text" id="ch_url_${i}" value="${urlVal}" placeholder="https://..."
+               style="width:100%;${isHtml?'':'display:none'}">
+        <input type="text" id="ch_cmd_${i}" value="${cmdVal}"
+               placeholder="PLAY ${i+1}-1 CLIP LOOP — leave blank to just CLEAR the channel"
+               style="width:100%;${!isHtml?'':'display:none'}">
+      </div>
+    </div>`;
   }).join('');
 }
 
@@ -837,10 +988,11 @@ function saveExePath() {
 function saveSettings() {
   const channels = getFormChannels();
   const payload = {
-    video_mode:    document.getElementById('video_mode').value,
-    amcp_port:     parseInt(document.getElementById('amcp_port').value),
-    web_port:      parseInt(document.getElementById('web_port').value),
-    startup_delay: parseInt(document.getElementById('startup_delay').value),
+    video_mode:       document.getElementById('video_mode').value,
+    amcp_port:        parseInt(document.getElementById('amcp_port').value),
+    web_port:         parseInt(document.getElementById('web_port').value),
+    startup_delay:    parseInt(document.getElementById('startup_delay').value),
+    autostart_caspar: document.getElementById('autostart_caspar').checked,
     channels,
   };
   api('/api/config', 'POST', payload).then(() => {

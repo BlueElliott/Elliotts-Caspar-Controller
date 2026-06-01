@@ -119,8 +119,8 @@ class CasperControllerGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(f"Elliott's Casper Controller  v{__version__}")
-        self.root.geometry("750x740")
-        self.root.resizable(False, False)
+        self.root.resizable(False, True)
+        self.root.minsize(750, 600)
         self.root.configure(bg=BG_DARK)
 
         self._cfg = load_config()
@@ -141,11 +141,15 @@ class CasperControllerGUI:
         self._console_window = None
         self._console_text = None
         self._log_handler = None
+        self._caspar_console_visible = False
 
         self._load_fonts()
         self._set_window_icon()
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Refit height after the first frame so winfo_reqheight is accurate
+        self.root.after(100, self._fit_window_height)
 
         # Auto-start web server
         self.root.after(400, self._start_web_server)
@@ -283,15 +287,26 @@ class CasperControllerGUI:
         port_cv.bind("<Leave>",    lambda e: port_cv.configure(cursor=""))
         self._port_cv = port_cv
 
-        # -- Network URL --
+        # -- URL row: Network (left) | Local (right) --
         local_ip = _get_local_ip()
         self._network_url = f"http://{local_ip}:{self._web_port}"
-        self._net_label = tk.Label(content, text=f"Network: {self._network_url}",
-                                    font=self.font_reg11, bg=BG_DARK, fg=ACCENT, cursor="hand2")
-        self._net_label.pack(pady=(0, 8))
+        url_row = tk.Frame(content, bg=BG_DARK)
+        url_row.pack(pady=(0, 8))
+
+        tk.Label(url_row, text="Network:", font=self.font_reg11,
+                 bg=BG_DARK, fg=MUTED).pack(side=tk.LEFT, padx=(0, 4))
+        self._net_label = tk.Label(url_row, text=self._network_url,
+                                   font=self.font_reg11, bg=BG_DARK, fg=ACCENT, cursor="hand2")
+        self._net_label.pack(side=tk.LEFT)
         self._net_label.bind("<Button-1>", lambda e: self._copy_url())
         self._net_label.bind("<Enter>",    lambda e: self._net_label.config(fg=TEXT))
         self._net_label.bind("<Leave>",    lambda e: self._net_label.config(fg=ACCENT))
+
+        tk.Label(url_row, text="   |   Local:", font=self.font_reg11,
+                 bg=BG_DARK, fg=MUTED).pack(side=tk.LEFT)
+        self._url_label = tk.Label(url_row, text=f"http://127.0.0.1:{self._web_port}/",
+                                   font=self.font_reg11, bg=BG_DARK, fg=MUTED)
+        self._url_label.pack(side=tk.LEFT, padx=(4, 0))
 
         # -- Status row (pulse + label + runtime) --
         status_f = tk.Frame(content, bg=BG_DARK)
@@ -304,24 +319,6 @@ class CasperControllerGUI:
         self._runtime_label = tk.Label(status_f, text="", font=self.font_reg,
                                         bg=BG_DARK, fg=MUTED)
         self._runtime_label.pack(side=tk.LEFT, padx=(16, 0))
-
-        self._url_label = tk.Label(content, text=f"http://127.0.0.1:{self._web_port}/",
-                                    font=self.font_reg, bg=BG_DARK, fg=MUTED)
-        self._url_label.pack(pady=(0, 6))
-
-        # -- CasparCG path info (read-only — edit via Web UI Settings) --
-        self._path_var = tk.StringVar(value=self._cfg.get("caspar_exe_path", "casparcg.exe"))
-        info_f = tk.Frame(content, bg=BG_CARD, pady=7, padx=14)
-        info_f.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(info_f, text="CasparCG:", font=self.font_bold, bg=BG_CARD, fg=MUTED,
-                 width=10, anchor="w").pack(side=tk.LEFT)
-        self._exe_display = tk.Label(info_f, textvariable=self._path_var,
-                                      bg=BG_CARD, fg=TEXT, font=self.font_reg,
-                                      anchor="w", justify="left")
-        self._exe_display.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 10))
-        tk.Label(info_f, text="Configure in Web UI → Settings",
-                  bg=BG_CARD, fg=ACCENT, font=(self.font_reg[0], 9),
-                  cursor="hand2").pack(side=tk.LEFT)
 
         # -- Action buttons --
         btn_area = tk.Frame(content, bg=BG_DARK)
@@ -356,19 +353,69 @@ class CasperControllerGUI:
         ch_outer.pack(fill=tk.X, pady=(4, 0))
         tk.Label(ch_outer, text="CHANNEL RESTARTS", font=self.font_bold,
                  bg=BG_DARK, fg=MUTED).pack(anchor="w", pady=(0, 6))
-        ch_row = tk.Frame(ch_outer, bg=BG_DARK)
-        ch_row.pack(fill=tk.X)
-        self._cfg = load_config()
-        for ch in self._cfg["channels"]:
+        self._ch_btn_container = tk.Frame(ch_outer, bg=BG_DARK)
+        self._ch_btn_container.pack(fill=tk.X)
+        self._last_channel_sig = ""
+        self._rebuild_channel_buttons()
+        self._poll_config_for_changes()
+
+    # -----------------------------------------------------------------------
+    # Dynamic channel buttons
+    # -----------------------------------------------------------------------
+
+    def _channel_sig(self, cfg: dict) -> str:
+        """A string that changes whenever channel names/count changes."""
+        return ",".join(f"{ch['number']}:{ch['name']}" for ch in cfg.get("channels", []))
+
+    def _rebuild_channel_buttons(self):
+        """Clear and recreate the channel restart buttons from current config."""
+        for widget in self._ch_btn_container.winfo_children():
+            widget.destroy()
+
+        cfg = load_config()
+        channels = cfg.get("channels", [])
+
+        # Buttons: fixed width, wrap into rows of max 6
+        btn_w, btn_h, btn_gap = 95, 36, 6
+        max_per_row = 6
+        row = None
+
+        for i, ch in enumerate(channels):
+            if i % max_per_row == 0:
+                row = tk.Frame(self._ch_btn_container, bg=BG_DARK)
+                row.pack(fill=tk.X, pady=(0, btn_gap))
             self._make_btn(
-                ch_row, f"↺  {ch['name']}",
+                row,
+                f"↺  {ch['name']}",
                 lambda n=ch["number"], name=ch["name"]: self._restart_ch(n, name),
-                BTN_GRAY, w=110, h=38,
-            ).pack(side=tk.LEFT, padx=(0, 6))
-        self._make_btn(
-            ch_row, "↺  All", self._restart_all,
-            BTN_ORNG, w=90, h=38,
-        ).pack(side=tk.LEFT, padx=(0, 6))
+                BTN_GRAY, w=btn_w, h=btn_h,
+            ).pack(side=tk.LEFT, padx=(0, btn_gap))
+
+        # "All" button — start a new row if the last row is already full
+        if row is None or len(channels) % max_per_row == 0:
+            row = tk.Frame(self._ch_btn_container, bg=BG_DARK)
+            row.pack(fill=tk.X, pady=(0, btn_gap))
+        self._make_btn(row, "↺  All", self._restart_all,
+                       BTN_ORNG, w=80, h=btn_h).pack(side=tk.LEFT, padx=(0, btn_gap))
+
+        self._last_channel_sig = self._channel_sig(cfg)
+        self.root.after(50, self._fit_window_height)
+
+    def _fit_window_height(self):
+        """Resize the window height to exactly fit its packed content."""
+        self.root.update_idletasks()
+        self.root.geometry(f"750x{self.root.winfo_reqheight()}")
+
+    def _poll_config_for_changes(self):
+        """Every 5s check if channels have changed and rebuild buttons if so."""
+        try:
+            cfg = load_config()
+            sig = self._channel_sig(cfg)
+            if sig != self._last_channel_sig:
+                self._rebuild_channel_buttons()
+        except Exception:
+            pass
+        self.root.after(5000, self._poll_config_for_changes)
 
     # -----------------------------------------------------------------------
     # Port card
@@ -536,6 +583,10 @@ class CasperControllerGUI:
             self._start_time = time.time()
             self._status_label.config(text=f"Web server running on port {self._web_port}", fg=ACCENT)
             self._enable_btn(self._btn_web, self._open_browser, "Open Web UI", BTN_BLUE)
+            # Auto-start CasparCG if configured
+            cfg = load_config()
+            if cfg.get("autostart_caspar"):
+                self.root.after(800, self._auto_start_caspar)
             return
 
         if self._server_error:
@@ -566,10 +617,6 @@ class CasperControllerGUI:
     # -----------------------------------------------------------------------
     # CasparCG process
     # -----------------------------------------------------------------------
-
-    def _refresh_exe_display(self):
-        cfg = load_config()
-        self._path_var.set(cfg.get("caspar_exe_path", "casparcg.exe"))
 
     def _check_updates(self):
         self._disable_btn(self._btn_update, "Checking...")
@@ -606,17 +653,28 @@ class CasperControllerGUI:
         self.root.after(3000, lambda: self._enable_btn(
             self._btn_update, self._check_updates, "Check for Updates", ACCENT))
 
-    def _start_caspar(self):
+    def _auto_start_caspar(self):
+        """Called on startup when autostart_caspar is enabled in config."""
+        self._status_label.config(text="Auto-starting CasparCG...", fg=MUTED)
+        self._disable_btn(self._btn_start, "Auto-Starting...")
+        self._start_caspar(_auto=True)
+
+    def _start_caspar(self, _auto: bool = False):
         exe = load_config().get("caspar_exe_path", "").strip()
         if not os.path.isfile(exe):
-            messagebox.showerror(
-                "CasparCG Not Found",
-                f"Cannot find:\n{exe or '(no path set)'}\n\n"
-                "Go to Web UI → Settings to set the CasparCG executable path.",
-                parent=self.root,
-            )
+            if not _auto:
+                messagebox.showerror(
+                    "CasparCG Not Found",
+                    f"Cannot find:\n{exe or '(no path set)'}\n\n"
+                    "Go to Web UI → Settings to set the CasparCG executable path.",
+                    parent=self.root,
+                )
+            else:
+                self._status_label.config(text="Auto-start: CasparCG exe not found — set path in Settings", fg=ERROR)
+                self._enable_btn(self._btn_start, self._start_caspar, "Start CasparCG", BTN_GREEN)
             return
-        self._disable_btn(self._btn_start, "Starting...")
+        if not _auto:
+            self._disable_btn(self._btn_start, "Starting...")
         self._status_label.config(text="Starting CasparCG...", fg=MUTED)
 
         def run():
@@ -676,6 +734,9 @@ class CasperControllerGUI:
 
     def _on_caspar_stopped(self):
         self._caspar_running = False
+        self._caspar_console_visible = False
+        self._redraw_btn(self._btn_console, "Open Console", BTN_GRAY)
+        self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
         self._status_label.config(text="CasparCG stopped", fg=MUTED)
         self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
         self._log_to_console("CasparCG stopped.")
@@ -753,6 +814,33 @@ class CasperControllerGUI:
                 pass
 
     def _toggle_console(self):
+        """Toggle console visibility.
+
+        While CasparCG is running: show/hide its native console window.
+        When CasparCG is stopped: open/close the app log window.
+        """
+        if self._caspar_running and self._manager:
+            self._toggle_caspar_console()
+        else:
+            self._toggle_app_log()
+
+    def _toggle_caspar_console(self):
+        if self._caspar_console_visible:
+            self._manager.hide_console()
+            self._caspar_console_visible = False
+            self._redraw_btn(self._btn_console, "Open Console", BTN_GRAY)
+            self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
+        else:
+            ok = self._manager.show_console()
+            if ok:
+                self._caspar_console_visible = True
+                self._redraw_btn(self._btn_console, "Hide Console", BTN_BLUE)
+                self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
+            else:
+                # HWND not resolved yet — fall through to app log
+                self._toggle_app_log()
+
+    def _toggle_app_log(self):
         try:
             alive = self._console_window and self._console_window.winfo_exists()
         except Exception:
@@ -760,10 +848,10 @@ class CasperControllerGUI:
 
         if not alive:
             self._console_window = tk.Toplevel(self.root)
-            self._console_window.title("Console — Elliott's Casper Controller")
+            self._console_window.title("App Log — Elliott's Casper Controller")
             self._console_window.geometry("800x400")
             self._console_window.configure(bg=BG_DARK)
-            self._console_window.protocol("WM_DELETE_WINDOW", self._close_console)
+            self._console_window.protocol("WM_DELETE_WINDOW", self._close_app_log)
 
             self._console_text = scrolledtext.ScrolledText(
                 self._console_window, bg="#1e1e1e", fg="#d4d4d4",
@@ -792,9 +880,9 @@ class CasperControllerGUI:
             self._redraw_btn(self._btn_console, "Close Console", BTN_BLUE)
             self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
         else:
-            self._close_console()
+            self._close_app_log()
 
-    def _close_console(self):
+    def _close_app_log(self):
         if self._log_handler:
             logging.getLogger().removeHandler(self._log_handler)
             self._log_handler = None

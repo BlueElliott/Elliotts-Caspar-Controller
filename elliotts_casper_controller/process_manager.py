@@ -22,6 +22,7 @@ class CasparProcessManager:
         self.window_title = window_title
         self._process: Optional[subprocess.Popen] = None
         self._client = AMCPClient(port=amcp_port)
+        self._console_hwnd = None  # conhost HWND, found after startup
 
     def start(self, config: dict | None = None) -> bool:
         if self.is_running():
@@ -30,20 +31,20 @@ class CasparProcessManager:
             from elliotts_casper_controller.config_manager import regenerate_caspar_config
             regenerate_caspar_config(config)
         try:
-            # Launch via cmd /k so we can set the console title and colour.
-            # Using list form (no shell=True) avoids cmd quoting pitfalls.
-            # cwd is already set to the exe directory so we just use the basename.
             exe_name = os.path.basename(self.exe_path)
-            # Strip characters that break cmd title or quoting
             safe_title = self.window_title.replace('"', "'").replace('&', 'and')
-            # Pass as a plain STRING (not a list) so Python skips list2cmdline.
-            # list2cmdline would escape the inner quotes as \" which cmd.exe then
-            # tries to execute literally as part of the filename.
-            # casparcg.exe has no spaces so no inner quoting is needed.
             cmd = f'cmd /k "color {_CONSOLE_COLOR} && title {safe_title} && {exe_name}"'
+
+            # Launch hidden — the console window is shown only on demand via show_console().
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0  # SW_HIDE
+
+            self._console_hwnd = None
             self._process = subprocess.Popen(
                 cmd,
                 cwd=self._exe_dir(),
+                startupinfo=si,
             )
             deadline = time.time() + self.startup_delay + 5
             while time.time() < deadline:
@@ -59,6 +60,25 @@ class CasparProcessManager:
             return False
         except Exception:
             return False
+
+    def show_console(self) -> bool:
+        """Make the CasparCG console window visible. Returns True if the HWND was found."""
+        if not self._console_hwnd and self._process:
+            self._console_hwnd = self._find_conhost_hwnd(self._process.pid)
+        if self._console_hwnd:
+            import ctypes
+            ctypes.windll.user32.ShowWindow(self._console_hwnd, 5)   # SW_SHOW
+            ctypes.windll.user32.SetForegroundWindow(self._console_hwnd)
+            return True
+        return False
+
+    def hide_console(self) -> bool:
+        """Hide the CasparCG console window. Returns True if the HWND was found."""
+        if self._console_hwnd:
+            import ctypes
+            ctypes.windll.user32.ShowWindow(self._console_hwnd, 0)   # SW_HIDE
+            return True
+        return False
 
     def stop(self) -> None:
         """Gracefully stop CasparCG then kill only our specific process tree."""
@@ -126,9 +146,12 @@ class CasparProcessManager:
             time.sleep(0.5)
 
         # --- Set custom icon on console window via conhost HWND ---
-        # GetWindowThreadProcessId returns conhost's PID for console windows.
         # WM_SETICON is permanent — CasparCG never overrides the window icon.
         if conhost_pid:
+            # Find the HWND even though the window is hidden (visible_only=False).
+            hwnd = self._find_hwnd_for_pid(conhost_pid, visible_only=False)
+            self._console_hwnd = hwnd  # store so show_console/hide_console can use it
+
             icon_path = self._find_icon()
             if icon_path:
                 try:
@@ -137,7 +160,6 @@ class CasparProcessManager:
                     WM_SETICON      = 0x0080
                     ICON_SMALL, ICON_BIG = 0, 1
 
-                    hwnd = self._find_hwnd_for_pid(conhost_pid)
                     if hwnd:
                         for icon_size, icon_type in [(16, ICON_SMALL), (32, ICON_BIG)]:
                             hIcon = user32.LoadImageW(
@@ -163,8 +185,8 @@ class CasparProcessManager:
             kernel32.FreeConsole()
 
     @staticmethod
-    def _find_hwnd_for_pid(pid: int):
-        """Return the first visible HWND whose owning process is `pid`."""
+    def _find_hwnd_for_pid(pid: int, visible_only: bool = True):
+        """Return the first HWND whose owning process is `pid`."""
         import ctypes
         import ctypes.wintypes
         user32 = ctypes.windll.user32
@@ -174,12 +196,24 @@ class CasparProcessManager:
         def _cb(hwnd, _):
             wpid = ctypes.wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
-            if wpid.value == pid and user32.IsWindowVisible(hwnd):
+            if wpid.value == pid and (not visible_only or user32.IsWindowVisible(hwnd)):
                 found.append(hwnd)
             return True
 
         user32.EnumWindows(_cb, 0)
         return found[0] if found else None
+
+    def _find_conhost_hwnd(self, root_pid: int):
+        """Walk the process tree to find conhost's HWND (visible or hidden)."""
+        try:
+            for child in psutil.Process(root_pid).children(recursive=True):
+                if 'conhost' in child.name().lower():
+                    hwnd = self._find_hwnd_for_pid(child.pid, visible_only=False)
+                    if hwnd:
+                        return hwnd
+        except psutil.NoSuchProcess:
+            pass
+        return None
 
     @staticmethod
     def _find_icon() -> str | None:
