@@ -88,10 +88,16 @@ class CasparProcessManager:
 
     def show_console(self) -> bool:
         """Make the CasparCG console window visible. Returns True if the HWND was found."""
+        import ctypes
+        # Primary: find by window title — most reliable since we set it via SetConsoleTitleW
+        if not self._console_hwnd:
+            hwnd = ctypes.windll.user32.FindWindowW(None, self.window_title)
+            if hwnd:
+                self._console_hwnd = hwnd
+        # Fallback: walk process tree to find conhost HWND
         if not self._console_hwnd and self._process:
             self._console_hwnd = self._find_conhost_hwnd(self._process.pid)
         if self._console_hwnd:
-            import ctypes
             ctypes.windll.user32.ShowWindow(self._console_hwnd, 5)   # SW_SHOW
             ctypes.windll.user32.SetForegroundWindow(self._console_hwnd)
             return True

@@ -468,14 +468,14 @@ def api_channel_stream(number: int):
         if not ndi.initialize():
             return
 
-        find = ndi.find_create_v3()
+        find = ndi.find_create_v2()
         if not find:
             ndi.destroy()
             return
 
-        # Locate the NDI source by name (up to 3 s)
+        # Locate the NDI source by name (up to 5 s)
         source = None
-        for _ in range(30):
+        for _ in range(50):
             ndi.find_wait_for_sources(find, 100)
             for s in ndi.find_get_current_sources(find):
                 if ndi_name.lower() in s.ndi_name.lower():
@@ -507,8 +507,8 @@ def api_channel_stream(number: int):
                 if t == ndi.FRAME_TYPE_VIDEO and v is not None:
                     try:
                         arr = np.copy(v.data)
-                        ndi.recv_free_video_v3(recv, v)
-                        img = Image.fromarray(arr[:, :, :3])  # RGBA → RGB
+                        ndi.recv_free_video_v2(recv, v)
+                        img = Image.fromarray(arr[:, :, :3])  # RGBX → RGB
                         buf = _io.BytesIO()
                         img.save(buf, format="JPEG", quality=80)
                         jpg = buf.getvalue()
@@ -517,7 +517,7 @@ def api_channel_stream(number: int):
                     except Exception:
                         pass
                 elif t == ndi.FRAME_TYPE_AUDIO and a is not None:
-                    ndi.recv_free_audio_v3(recv, a)
+                    ndi.recv_free_audio_v2(recv, a)
                 elif t == ndi.FRAME_TYPE_METADATA and m is not None:
                     ndi.recv_free_metadata(recv, m)
         finally:
@@ -697,8 +697,22 @@ function updateStatus() {
     const running = data.running;
     document.getElementById('pulse').className = 'pulse ' + (running ? 'pulse-green' : 'pulse-red');
     document.getElementById('server-status-label').textContent = running ? 'CasparCG Running' : 'CasparCG Stopped';
+
+    // Preserve user input across re-renders
+    const saved = {};
+    document.querySelectorAll('[id^="amcp_"], [id^="media_"]').forEach(el => {
+      if (el.value) saved[el.id] = el.value;
+    });
+
     renderChannels(data.channels);
     loadMediaClips();
+
+    // Restore preserved values
+    Object.entries(saved).forEach(([id, val]) => {
+      const el = document.getElementById(id);
+      if (el) el.value = val;
+    });
+
     if (lastRunning !== null && lastRunning !== running)
       toast(running ? 'CasparCG is now running' : 'CasparCG stopped', running ? 'success' : 'warning');
     lastRunning = running;

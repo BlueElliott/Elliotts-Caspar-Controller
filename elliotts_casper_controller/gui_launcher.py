@@ -144,6 +144,8 @@ class CasperControllerGUI:
         self._log_handler = None
         self._caspar_console_visible = False
         self._btn_caspar_console = None
+        self._caspar_start_time: float | None = None
+        self._caspar_runtime_label = None
 
         self._load_fonts()
         self._set_window_icon()
@@ -155,6 +157,7 @@ class CasperControllerGUI:
 
         # Auto-start web server
         self.root.after(400, self._start_web_server)
+        self.root.after(60_000, self._resync_caspar_runtime)
         self._update_pulse()
         self._update_runtime()
         self._poll_caspar_status()
@@ -310,17 +313,28 @@ class CasperControllerGUI:
                                    font=self.font_reg11, bg=BG_DARK, fg=MUTED)
         self._url_label.pack(side=tk.LEFT, padx=(4, 0))
 
-        # -- Status row (pulse + label + runtime) --
+        # -- Status row (pulse + label) --
         status_f = tk.Frame(content, bg=BG_DARK)
-        status_f.pack(pady=(0, 4))
+        status_f.pack(pady=(0, 2))
         self._pulse_label = tk.Label(status_f, bg=BG_DARK, bd=0, highlightthickness=0)
         self._pulse_label.pack(side=tk.LEFT, padx=(0, 8))
         self._status_label = tk.Label(status_f, text="Web server starting...",
                                        font=self.font_reg11, bg=BG_DARK, fg=MUTED)
         self._status_label.pack(side=tk.LEFT)
-        self._runtime_label = tk.Label(status_f, text="", font=self.font_reg,
+
+        # -- Dual runtime row --
+        runtime_f = tk.Frame(content, bg=BG_DARK)
+        runtime_f.pack(pady=(0, 6))
+        tk.Label(runtime_f, text="Controller:", font=self.font_reg,
+                 bg=BG_DARK, fg=MUTED).pack(side=tk.LEFT)
+        self._runtime_label = tk.Label(runtime_f, text="—", font=self.font_reg,
                                         bg=BG_DARK, fg=MUTED)
-        self._runtime_label.pack(side=tk.LEFT, padx=(16, 0))
+        self._runtime_label.pack(side=tk.LEFT, padx=(4, 0))
+        tk.Label(runtime_f, text="   |   CasparCG:", font=self.font_reg,
+                 bg=BG_DARK, fg=MUTED).pack(side=tk.LEFT, padx=(12, 0))
+        self._caspar_runtime_label = tk.Label(runtime_f, text="Stopped", font=self.font_reg,
+                                               bg=BG_DARK, fg=MUTED)
+        self._caspar_runtime_label.pack(side=tk.LEFT, padx=(4, 0))
 
         # -- Action buttons --
         btn_area = tk.Frame(content, bg=BG_DARK)
@@ -519,19 +533,47 @@ class CasperControllerGUI:
     # Runtime counter
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _fmt_elapsed(seconds: int) -> str:
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            return f"{h}h {m}m {s}s"
+        if m:
+            return f"{m}m {s}s"
+        return f"{s}s"
+
     def _update_runtime(self):
         if self._web_running:
             elapsed = int(time.time() - self._start_time)
-            h, rem = divmod(elapsed, 3600)
-            m, s   = divmod(rem, 60)
-            if h:
-                rt = f"Runtime: {h}h {m}m {s}s"
-            elif m:
-                rt = f"Runtime: {m}m {s}s"
-            else:
-                rt = f"Runtime: {s}s"
-            self._runtime_label.config(text=rt)
+            self._runtime_label.config(text=self._fmt_elapsed(elapsed), fg=ACCENT)
+        else:
+            self._runtime_label.config(text="—", fg=MUTED)
+
+        if self._caspar_running and self._caspar_start_time:
+            elapsed = int(time.time() - self._caspar_start_time)
+            self._caspar_runtime_label.config(text=self._fmt_elapsed(elapsed), fg=SUCCESS)
+        else:
+            self._caspar_runtime_label.config(text="Stopped", fg=MUTED)
+
         self.root.after(1000, self._update_runtime)
+
+    def _resync_caspar_runtime(self):
+        """Every 60 s — verify CasparCG is still running via AMCP and reset timer if it restarted."""
+        def check():
+            try:
+                cfg = load_config()
+                alive = AMCPClient(port=cfg["amcp_port"]).ping()
+                if not alive and self._caspar_running:
+                    # Detected stop that poll hadn't caught yet
+                    self.root.after(0, self._on_caspar_stopped)
+                elif alive and not self._caspar_start_time:
+                    # Running but no start time — set it now
+                    self._caspar_start_time = time.time()
+            except Exception:
+                pass
+        threading.Thread(target=check, daemon=True).start()
+        self.root.after(60_000, self._resync_caspar_runtime)
 
     # -----------------------------------------------------------------------
     # Web server
@@ -711,6 +753,7 @@ class CasperControllerGUI:
 
     def _on_caspar_started(self):
         self._caspar_running = True
+        self._caspar_start_time = time.time()
         self._caspar_console_visible = False
         self._status_label.config(text="CasparCG running — all channels loaded", fg=SUCCESS)
         self._enable_btn(self._btn_start, self._start_caspar, "Start CasparCG", BTN_GREEN)
@@ -741,6 +784,7 @@ class CasperControllerGUI:
 
     def _on_caspar_stopped(self):
         self._caspar_running = False
+        self._caspar_start_time = None
         self._caspar_console_visible = False
         self._disable_btn(self._btn_caspar_console, "CasparCG Console")
         self._status_label.config(text="CasparCG stopped", fg=MUTED)
@@ -759,6 +803,7 @@ class CasperControllerGUI:
             )
             if self._manager.adopt_existing():
                 self._caspar_running = True
+                self._caspar_start_time = time.time()
                 self._caspar_console_visible = False
                 self._status_label.config(text="CasparCG running (reconnected)", fg=SUCCESS)
                 self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
