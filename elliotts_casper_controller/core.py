@@ -442,41 +442,93 @@ def api_channel_amcp(number: int, req: AMCPCommandRequest):
     return {"ok": True, "response": res}
 
 
-@app.get("/api/channel/{number}/preview")
-def api_channel_preview(number: int):
-    """Capture a live snapshot of a CasparCG channel via AMCP PRINT and return it as PNG."""
-    import glob
-    from fastapi.responses import FileResponse, Response
+@app.get("/api/channel/{number}/stream")
+def api_channel_stream(number: int):
+    """Live MJPEG stream of a CasparCG NDI output via ndi-python."""
+    from fastapi.responses import StreamingResponse as _SR
+    try:
+        import NDIlib as ndi
+        import numpy as np
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="ndi-python not installed. Run: pip install ndi-python numpy"
+        )
+
     cfg = load_config()
-    exe = cfg.get("caspar_exe_path", "")
-    if not exe or not os.path.isfile(exe):
-        raise HTTPException(status_code=503, detail="CasparCG exe not configured")
-    exe_dir = os.path.dirname(os.path.abspath(exe))
-    client = AMCPClient(port=cfg["amcp_port"])
-    if not client.ping():
-        raise HTTPException(status_code=503, detail="CasparCG not running")
-    client.send(f"PRINT {number}")
-    time.sleep(0.6)  # wait for CasparCG to write the file
-    # CasparCG saves PRINT output to various locations depending on version
-    candidates = [
-        os.path.join(exe_dir, f"{number}.png"),
-        os.path.join(exe_dir, "thumbnails", f"{number}.png"),
-        os.path.join(exe_dir, "log", f"{number}.png"),
-        os.path.join(exe_dir, "data", f"{number}.png"),
-    ]
-    # Also pick up the most recently written PNG anywhere one level deep
-    recent = sorted(
-        glob.glob(os.path.join(exe_dir, "*.png")) +
-        glob.glob(os.path.join(exe_dir, "*", "*.png")),
-        key=os.path.getmtime, reverse=True,
+    channels = {ch["number"]: ch for ch in cfg["channels"]}
+    if number not in channels:
+        raise HTTPException(status_code=404, detail=f"Channel {number} not found")
+    ndi_name = channels[number].get("ndi_name", "")
+
+    def _generate():
+        from PIL import Image
+        import io as _io
+
+        if not ndi.initialize():
+            return
+
+        find = ndi.find_create_v3()
+        if not find:
+            ndi.destroy()
+            return
+
+        # Locate the NDI source by name (up to 3 s)
+        source = None
+        for _ in range(30):
+            ndi.find_wait_for_sources(find, 100)
+            for s in ndi.find_get_current_sources(find):
+                if ndi_name.lower() in s.ndi_name.lower():
+                    source = s
+                    break
+            if source:
+                break
+
+        if not source:
+            ndi.find_destroy(find)
+            ndi.destroy()
+            return
+
+        recv_create = ndi.RecvCreateV3()
+        recv_create.color_format = ndi.RECV_COLOR_FORMAT_RGBX_RGBA
+        recv_create.bandwidth = ndi.RECV_BANDWIDTH_HIGHEST
+        recv = ndi.recv_create_v3(recv_create)
+        if not recv:
+            ndi.find_destroy(find)
+            ndi.destroy()
+            return
+
+        ndi.recv_connect(recv, source)
+        ndi.find_destroy(find)
+
+        try:
+            while True:
+                t, v, a, m = ndi.recv_capture_v3(recv, 1000)
+                if t == ndi.FRAME_TYPE_VIDEO and v is not None:
+                    try:
+                        arr = np.copy(v.data)
+                        ndi.recv_free_video_v3(recv, v)
+                        img = Image.fromarray(arr[:, :, :3])  # RGBA → RGB
+                        buf = _io.BytesIO()
+                        img.save(buf, format="JPEG", quality=80)
+                        jpg = buf.getvalue()
+                        yield (b"--mjpegframe\r\n"
+                               b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n")
+                    except Exception:
+                        pass
+                elif t == ndi.FRAME_TYPE_AUDIO and a is not None:
+                    ndi.recv_free_audio_v3(recv, a)
+                elif t == ndi.FRAME_TYPE_METADATA and m is not None:
+                    ndi.recv_free_metadata(recv, m)
+        finally:
+            ndi.recv_destroy(recv)
+            ndi.destroy()
+
+    return _SR(
+        _generate(),
+        media_type="multipart/x-mixed-replace; boundary=mjpegframe",
+        headers={"Cache-Control": "no-cache, no-store"},
     )
-    if recent:
-        candidates.insert(0, recent[0])
-    for path in candidates:
-        if os.path.isfile(path):
-            return FileResponse(path, media_type="image/png",
-                                headers={"Cache-Control": "no-store, no-cache"})
-    raise HTTPException(status_code=404, detail="Snapshot not available — PRINT may not be supported by this CasparCG build")
 
 
 @app.get("/api/media")
@@ -709,66 +761,40 @@ def page_multiviewer():
         frames += f"""
 <div class="mv-frame">
   <div style="position:relative;background:#000;height:180px;display:flex;align-items:center;justify-content:center">
-    <img id="snap-{ch['number']}" src="/api/channel/{ch['number']}/preview?t=0"
+    <img id="stream-{ch['number']}" src="/api/channel/{ch['number']}/stream"
          style="max-width:100%;max-height:180px;object-fit:contain;display:block"
-         onerror="this.style.display='none';document.getElementById('snap-err-{ch['number']}').style.display='flex'"
-         onload="this.style.display='block';document.getElementById('snap-err-{ch['number']}').style.display='none'">
-    <div id="snap-err-{ch['number']}" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;flex-direction:column;gap:6px;color:var(--muted);font-size:12px">
-      <span style="font-size:28px">📷</span>
-      <span>No snapshot — CasparCG running?</span>
+         onerror="this.style.display='none';document.getElementById('err-{ch['number']}').style.display='flex'"
+         onload="document.getElementById('err-{ch['number']}').style.display='none'">
+    <div id="err-{ch['number']}" style="display:none;position:absolute;inset:0;align-items:center;
+         justify-content:center;flex-direction:column;gap:6px;color:var(--muted);font-size:12px">
+      <span style="font-size:28px;opacity:.4">▶</span>
+      <span>No signal — is CasparCG running?</span>
+      <button class="btn btn-secondary btn-sm" onclick="reconnect({ch['number']})">Reconnect</button>
     </div>
   </div>
   <div class="mv-label">
     <span>CH{ch['number']} — {ch['name']} &nbsp;{type_badge}</span>
-    <button class="btn btn-secondary btn-sm" onclick="refreshSnap({ch['number']})">Refresh</button>
+    <span style="color:var(--muted);font-size:11px">{ch.get('ndi_name','')}</span>
   </div>
 </div>"""
 
     body = f"""
-<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-  <p style="color:var(--muted);margin:0">Live snapshots via CasparCG PRINT — all channel types supported.</p>
-  <div style="display:flex;align-items:center;gap:12px">
-    <label style="color:var(--muted);font-size:13px;margin:0">
-      Refresh every
-      <select id="refresh-interval" onchange="setRefreshInterval()"
-              style="width:auto;display:inline;padding:4px 8px;margin-left:4px">
-        <option value="0">Manual</option>
-        <option value="3000">3s</option>
-        <option value="5000" selected>5s</option>
-        <option value="10000">10s</option>
-        <option value="30000">30s</option>
-      </select>
-    </label>
-    <button class="btn btn-primary btn-sm" onclick="refreshAll()">Refresh All</button>
-  </div>
-</div>
+<p style="color:var(--muted);margin-bottom:16px">
+  Live NDI output preview via MJPEG — all channel types. Requires <code>ndi-python</code> and CasparCG running.
+</p>
 <div class="mv-grid">
 {frames}
 </div>
 """
     js = """
-let _refreshTimer = null;
-
-function refreshSnap(n) {
-  const img = document.getElementById('snap-' + n);
+function reconnect(n) {
+  const img = document.getElementById('stream-' + n);
+  const err = document.getElementById('err-' + n);
   if (!img) return;
-  img.src = '/api/channel/' + n + '/preview?t=' + Date.now();
+  err.style.display = 'none';
+  img.style.display = 'block';
+  img.src = '/api/channel/' + n + '/stream?' + Date.now();
 }
-
-function refreshAll() {
-  document.querySelectorAll('[id^="snap-"]').forEach(img => {
-    const n = img.id.split('-')[1];
-    if (!isNaN(n)) img.src = '/api/channel/' + n + '/preview?t=' + Date.now();
-  });
-}
-
-function setRefreshInterval() {
-  clearInterval(_refreshTimer);
-  const ms = parseInt(document.getElementById('refresh-interval').value);
-  if (ms > 0) _refreshTimer = setInterval(refreshAll, ms);
-}
-
-setRefreshInterval();
 """
     return HTMLResponse(page("Multiviewer", "multiviewer", body, js))
 

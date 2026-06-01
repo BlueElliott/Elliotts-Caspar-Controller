@@ -13,6 +13,28 @@ from elliotts_casper_controller.amcp_client import AMCPClient
 _CONSOLE_COLOR = "0B"
 
 
+class _AdoptedProcess:
+    """Minimal Popen-compatible wrapper around an existing process found via psutil."""
+    def __init__(self, pid: int):
+        self._pid = pid
+        try:
+            self._psutil = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            self._psutil = None
+
+    def poll(self):
+        if self._psutil is None:
+            return 0
+        try:
+            return None if self._psutil.is_running() else 0
+        except psutil.NoSuchProcess:
+            return 0
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+
 class CasparProcessManager:
     def __init__(self, exe_path: str, amcp_port: int = 5250, startup_delay: int = 8,
                  window_title: str = "PCR3 CasparCG - NDI Server"):
@@ -27,6 +49,9 @@ class CasparProcessManager:
     def start(self, config: dict | None = None) -> bool:
         if self.is_running():
             return True
+        # Kill any orphaned CasparCG instances before launching a fresh one
+        if self._client.ping():
+            self._kill_all_caspar_instances()
         if config:
             from elliotts_casper_controller.config_manager import regenerate_caspar_config
             regenerate_caspar_config(config)
@@ -79,6 +104,52 @@ class CasparProcessManager:
             ctypes.windll.user32.ShowWindow(self._console_hwnd, 0)   # SW_HIDE
             return True
         return False
+
+    def adopt_existing(self) -> bool:
+        """Find a running CasparCG process and adopt it so we can control it.
+
+        Searches for casparcg.exe, uses its parent cmd.exe as the root process
+        (matching how we launch it). Returns True if adopted.
+        """
+        if not self._client.ping():
+            return False
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                if "casparcg" not in proc.name().lower():
+                    continue
+                # Prefer the parent cmd.exe so kill_tree works the same way
+                try:
+                    parent = proc.parent()
+                    root = parent if parent and "cmd" in parent.name().lower() else proc
+                except Exception:
+                    root = proc
+                self._process = _AdoptedProcess(root.pid)
+                self._console_hwnd = None
+                threading.Thread(
+                    target=self._rename_console_after_delay, daemon=True
+                ).start()
+                return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        return False
+
+    @staticmethod
+    def _kill_all_caspar_instances() -> None:
+        """Kill every casparcg.exe (and its cmd.exe parent) found on this machine."""
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                if "casparcg" in proc.name().lower():
+                    try:
+                        parent = proc.parent()
+                        if parent and "cmd" in parent.name().lower():
+                            CasparProcessManager._kill_tree(parent.pid)
+                        else:
+                            CasparProcessManager._kill_tree(proc.pid)
+                    except Exception:
+                        CasparProcessManager._kill_tree(proc.pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        time.sleep(1.5)
 
     def stop(self) -> None:
         """Gracefully stop CasparCG then kill only our specific process tree."""

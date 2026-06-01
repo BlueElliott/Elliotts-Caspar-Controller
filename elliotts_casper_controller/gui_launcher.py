@@ -68,6 +68,7 @@ ACCENT_DK = "#0097a7"
 TEXT      = "#ffffff"
 MUTED     = "#888888"
 BTN_BLUE  = "#2196f3"
+BTN_CASPAR= "#006978"  # dark teal — CasparCG console button
 BTN_GREEN = "#4caf50"
 BTN_RED   = "#ff5252"
 BTN_RED_DK= "#c0392b"
@@ -142,6 +143,7 @@ class CasperControllerGUI:
         self._console_text = None
         self._log_handler = None
         self._caspar_console_visible = False
+        self._btn_caspar_console = None
 
         self._load_fonts()
         self._set_window_icon()
@@ -335,17 +337,20 @@ class CasperControllerGUI:
         row2.pack(pady=4)
         self._btn_web = self._make_btn(row2, "Open Web UI", self._open_browser, BTN_BLUE, h=46, state=tk.DISABLED)
         self._btn_web.pack(side=tk.LEFT, padx=6)
-        self._btn_console = self._make_btn(row2, "Open Console", self._toggle_console, BTN_GRAY, h=46)
-        self._btn_console.pack(side=tk.LEFT, padx=6)
+        self._btn_caspar_console = self._make_btn(
+            row2, "CasparCG Console", self._toggle_caspar_console, BTN_CASPAR, h=46, state=tk.DISABLED)
+        self._btn_caspar_console.pack(side=tk.LEFT, padx=6)
 
         row3 = tk.Frame(btn_area, bg=BG_DARK)
         row3.pack(pady=4)
-        self._btn_update = self._make_btn(row3, "Check for Updates", self._check_updates, ACCENT, h=46)
-        self._btn_update.pack(side=tk.LEFT, padx=6)
+        self._btn_console = self._make_btn(row3, "Open Console", self._toggle_console, BTN_GRAY, h=46)
+        self._btn_console.pack(side=tk.LEFT, padx=6)
         self._make_btn(row3, "Hide to Tray", self._hide_to_tray, BTN_GRAY, h=46).pack(side=tk.LEFT, padx=6)
 
         row4 = tk.Frame(btn_area, bg=BG_DARK)
         row4.pack(pady=4)
+        self._btn_update = self._make_btn(row4, "Check for Updates", self._check_updates, ACCENT, h=46)
+        self._btn_update.pack(side=tk.LEFT, padx=6)
         self._make_btn(row4, "Quit", self._on_close, BTN_RED_DK, h=46).pack(side=tk.LEFT, padx=6)
 
         # -- Channel restarts --
@@ -706,9 +711,11 @@ class CasperControllerGUI:
 
     def _on_caspar_started(self):
         self._caspar_running = True
+        self._caspar_console_visible = False
         self._status_label.config(text="CasparCG running — all channels loaded", fg=SUCCESS)
         self._enable_btn(self._btn_start, self._start_caspar, "Start CasparCG", BTN_GREEN)
         self._enable_btn(self._btn_stop, self._stop_caspar,  "Stop CasparCG",  BTN_RED)
+        self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console, "CasparCG Console", BTN_CASPAR)
         self._log_to_console("CasparCG started and all channels loaded.")
 
     def _on_caspar_failed(self, reason: str):
@@ -735,11 +742,32 @@ class CasperControllerGUI:
     def _on_caspar_stopped(self):
         self._caspar_running = False
         self._caspar_console_visible = False
-        self._redraw_btn(self._btn_console, "Open Console", BTN_GRAY)
-        self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
+        self._disable_btn(self._btn_caspar_console, "CasparCG Console")
         self._status_label.config(text="CasparCG stopped", fg=MUTED)
         self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
         self._log_to_console("CasparCG stopped.")
+
+    def _try_adopt_caspar(self):
+        """Attempt to adopt an already-running CasparCG process."""
+        try:
+            cfg = load_config()
+            self._manager = CasparProcessManager(
+                exe_path=cfg.get("caspar_exe_path", "casparcg.exe"),
+                amcp_port=cfg["amcp_port"],
+                startup_delay=cfg["startup_delay"],
+                window_title="PCR3 CasparCG — NDI Server",
+            )
+            if self._manager.adopt_existing():
+                self._caspar_running = True
+                self._caspar_console_visible = False
+                self._status_label.config(text="CasparCG running (reconnected)", fg=SUCCESS)
+                self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
+                self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console, "CasparCG Console", BTN_CASPAR)
+                self._log_to_console("Reconnected to existing CasparCG instance.")
+            else:
+                self._manager = None
+        except Exception:
+            self._manager = None
 
     def _poll_caspar_status(self):
         def check():
@@ -747,14 +775,16 @@ class CasperControllerGUI:
                 cfg = load_config()
                 client = AMCPClient(port=cfg["amcp_port"])
                 running = client.ping()
-                if running != self._caspar_running:
+                if running and not self._manager:
+                    # CasparCG is up but we have no handle — try to adopt it
+                    self.root.after(0, self._try_adopt_caspar)
+                elif running != self._caspar_running:
                     self._caspar_running = running
                     if running:
                         self.root.after(0, lambda: self._status_label.config(
                             text="CasparCG running", fg=SUCCESS))
                     else:
-                        self.root.after(0, lambda: self._status_label.config(
-                            text="CasparCG stopped", fg=MUTED))
+                        self.root.after(0, self._on_caspar_stopped)
             except Exception:
                 pass
             self.root.after(4000, self._poll_caspar_status)
@@ -814,33 +844,7 @@ class CasperControllerGUI:
                 pass
 
     def _toggle_console(self):
-        """Toggle console visibility.
-
-        While CasparCG is running: show/hide its native console window.
-        When CasparCG is stopped: open/close the app log window.
-        """
-        if self._caspar_running and self._manager:
-            self._toggle_caspar_console()
-        else:
-            self._toggle_app_log()
-
-    def _toggle_caspar_console(self):
-        if self._caspar_console_visible:
-            self._manager.hide_console()
-            self._caspar_console_visible = False
-            self._redraw_btn(self._btn_console, "Open Console", BTN_GRAY)
-            self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
-        else:
-            ok = self._manager.show_console()
-            if ok:
-                self._caspar_console_visible = True
-                self._redraw_btn(self._btn_console, "Hide Console", BTN_BLUE)
-                self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
-            else:
-                # HWND not resolved yet — fall through to app log
-                self._toggle_app_log()
-
-    def _toggle_app_log(self):
+        """Open/close the app log window (Python stdout/stderr/logging)."""
         try:
             alive = self._console_window and self._console_window.winfo_exists()
         except Exception:
@@ -851,7 +855,7 @@ class CasperControllerGUI:
             self._console_window.title("App Log — Elliott's Casper Controller")
             self._console_window.geometry("800x400")
             self._console_window.configure(bg=BG_DARK)
-            self._console_window.protocol("WM_DELETE_WINDOW", self._close_app_log)
+            self._console_window.protocol("WM_DELETE_WINDOW", self._close_console)
 
             self._console_text = scrolledtext.ScrolledText(
                 self._console_window, bg="#1e1e1e", fg="#d4d4d4",
@@ -880,9 +884,9 @@ class CasperControllerGUI:
             self._redraw_btn(self._btn_console, "Close Console", BTN_BLUE)
             self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
         else:
-            self._close_app_log()
+            self._close_console()
 
-    def _close_app_log(self):
+    def _close_console(self):
         if self._log_handler:
             logging.getLogger().removeHandler(self._log_handler)
             self._log_handler = None
@@ -897,6 +901,24 @@ class CasperControllerGUI:
         sys.stderr = sys.__stderr__
         self._redraw_btn(self._btn_console, "Open Console", BTN_GRAY)
         self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
+
+    def _toggle_caspar_console(self):
+        """Show/hide the native CasparCG cmd window."""
+        if not self._manager:
+            return
+        if self._caspar_console_visible:
+            self._manager.hide_console()
+            self._caspar_console_visible = False
+            self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console,
+                             "CasparCG Console", BTN_CASPAR)
+        else:
+            ok = self._manager.show_console()
+            if ok:
+                self._caspar_console_visible = True
+                self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console,
+                                 "Hide Console", BTN_GRAY)
+            else:
+                self._log_to_console("CasparCG console window not found yet — try again in a moment.")
 
     # -----------------------------------------------------------------------
     # Tray / close
