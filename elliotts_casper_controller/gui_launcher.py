@@ -584,17 +584,20 @@ class CasperControllerGUI:
                         logger.warning(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
                         errors.append(inst["id"])
 
+                self._sync_api_managers()
                 if started:
                     self.root.after(0, lambda s=len(started), total=len(instances):
                                     self._on_caspar_started(s, total))
                 else:
                     self._managers = {}
+                    self._sync_api_managers()
                     self.root.after(0, lambda: self._on_caspar_failed(
                         "No CasparCG instances started successfully.\n"
                         "Check the exe path and that AMCP ports are free."
                     ))
             except Exception as exc:
                 self._managers = {}
+                self._sync_api_managers()
                 self.root.after(0, lambda: self._on_caspar_failed(str(exc)))
 
         threading.Thread(target=run, daemon=True).start()
@@ -625,6 +628,7 @@ class CasperControllerGUI:
             # Kill any stragglers
             CasparProcessManager._kill_all_caspar_instances()
             self._managers = {}
+            self._sync_api_managers()
             self.root.after(0, self._on_caspar_stopped)
 
         self._disable_btn(self._btn_stop, "Stopping...")
@@ -635,6 +639,21 @@ class CasperControllerGUI:
         self._status_label.config(text="CasparCG stopped", fg=MUTED)
         self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
         logger.info("CasparCG stopped.")
+
+    def _sync_api_managers(self) -> None:
+        """Mirror self._managers into core._managers so dashboard controls work."""
+        import sys
+        core = sys.modules.get("elliotts_casper_controller.core")
+        if core is None:
+            return
+        try:
+            for k in list(core._managers.keys()):
+                if k not in self._managers:
+                    del core._managers[k]
+            for k, v in self._managers.items():
+                core._managers[k] = v
+        except Exception:
+            pass
 
     def _try_adopt_instances(self):
         """Attempt to adopt any running CasparCG instances that we don't manage yet."""
@@ -657,6 +676,7 @@ class CasperControllerGUI:
                 if m.adopt_existing():
                     self._managers[inst["id"]] = m
                     adopted += 1
+            self._sync_api_managers()
             if adopted > 0:
                 self._caspar_running = True
                 self._status_label.config(
@@ -739,6 +759,7 @@ class CasperControllerGUI:
             else:
                 logger.warning(f"Inst {inst_id} ({name}) failed to restart")
                 self._managers.pop(inst_id, None)
+            self._sync_api_managers()
         threading.Thread(target=run, daemon=True).start()
 
     def _restart_all(self):
@@ -767,8 +788,8 @@ class CasperControllerGUI:
                 else:
                     logger.warning(f"Inst {inst['id']} failed to restart")
                     self._managers.pop(inst["id"], None)
+            self._sync_api_managers()
         threading.Thread(target=run, daemon=True).start()
-
 
     # -----------------------------------------------------------------------
     # Tray / close

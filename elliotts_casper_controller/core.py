@@ -451,18 +451,12 @@ def _restart_instance_bg(inst_id: int):
     if not inst:
         return
     port = instance_amcp_port(cfg, inst)
+    # Kill whatever is on this port — works whether started from GUI or web
     if inst_id in _managers:
         _managers[inst_id].stop()
         _managers.pop(inst_id, None)
     else:
-        # No manager (e.g. started from GUI) — send BYE and wait for port to close
-        client = AMCPClient(port=port)
-        if client.ping():
-            client.send("BYE")
-            for _ in range(10):
-                time.sleep(0.5)
-                if not AMCPClient(port=port).ping():
-                    break
+        CasparProcessManager._kill_caspar_on_port(port)
     regenerate_instance_config(cfg, inst)
     m = _make_manager(inst, cfg)
     _managers[inst_id] = m
@@ -539,9 +533,7 @@ def api_instance_stop(inst_id: int):
             _managers[inst_id].stop()
             _managers.pop(inst_id, None)
         else:
-            client = AMCPClient(port=port)
-            if client.ping():
-                client.send("BYE")
+            CasparProcessManager._kill_caspar_on_port(port)
         _log_event(f"Inst {inst_id} ({inst['name']}) stopped.")
 
     threading.Thread(target=_do_stop, daemon=True).start()
@@ -715,8 +707,8 @@ def page_dashboard():
       <span id="server-status-label">Checking...</span>
     </div>
     <div style="display:flex;gap:8px">
-      <button class="btn btn-success" onclick="serverAction('start')">Start CasparCG</button>
-      <button class="btn btn-danger"  onclick="serverAction('stop')">Stop CasparCG</button>
+      <button class="btn btn-success" onclick="serverAction('start')">Start All</button>
+      <button class="btn btn-danger"  onclick="serverAction('stop')">Stop All</button>
       <button class="btn btn-warning" onclick="restartAll()">Restart All</button>
     </div>
   </div>
@@ -760,7 +752,7 @@ function renderInstances(instances) {
       ? '<span class="badge badge-neutral" style="font-size:10px">HTML5</span>'
       : '<span class="badge badge-warning" style="font-size:10px">Media</span>';
     const sourceInfo = isHtml
-      ? `<div class="ch-ndi" title="${inst.url}" style="word-break:break-all;font-size:11px">${inst.url ? inst.url.replace(/^https?:\\/\\//, '').substring(0,45)+(inst.url.length>52?'...':'') : '(no url)'}</div>`
+      ? ''
       : `<div class="ch-ndi" style="color:var(--warning);font-size:11px">${inst.startup_command || '(no startup command)'}</div>`;
     const amcpRow = !isHtml ? `
       <div style="display:flex;gap:4px;margin-top:4px">

@@ -141,6 +141,26 @@ class CasparProcessManager:
         return False
 
     @staticmethod
+    def _kill_caspar_on_port(port: int) -> None:
+        """Kill the CasparCG process (and its cmd parent) listening on a specific AMCP port."""
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                for conn in proc.connections(kind="inet"):
+                    if conn.laddr.port == port and conn.status == "LISTEN":
+                        try:
+                            parent = proc.parent()
+                            if parent and "cmd" in parent.name().lower():
+                                CasparProcessManager._kill_tree(parent.pid)
+                            else:
+                                CasparProcessManager._kill_tree(proc.pid)
+                        except Exception:
+                            CasparProcessManager._kill_tree(proc.pid)
+                        break
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        time.sleep(0.3)
+
+    @staticmethod
     def _kill_all_caspar_instances() -> None:
         """Kill every casparcg.exe (and its cmd.exe parent) found on this machine."""
         for proc in psutil.process_iter(["pid", "name"]):
