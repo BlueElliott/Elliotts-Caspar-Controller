@@ -732,9 +732,10 @@ class CasperControllerGUI:
                 self._managers = {}
                 started = []
                 errors = []
-                lock = threading.Lock()
 
-                def start_one(inst):
+                # Sequential startup — ensures NDI sources appear on the network one at a time
+                # in config order, preventing Tricaster from latching onto the wrong source.
+                for inst in instances:
                     port = instance_amcp_port(cfg, inst)
                     m = CasparProcessManager(
                         exe_path=exe,
@@ -743,25 +744,15 @@ class CasperControllerGUI:
                         window_title=f"PCR3 CasparCG — {inst['name']}",
                         config_filename=f"casparcg_inst_{inst['id']}.config",
                     )
-                    with lock:
-                        self._managers[inst["id"]] = m
+                    self._managers[inst["id"]] = m
                     ok = m.start()
                     if ok:
                         res = self._send_instance_load(inst, AMCPClient(port=port))
                         self._log_to_console(f"Inst {inst['id']} ({inst['name']}) → {res[:60]}")
-                        with lock:
-                            started.append(inst["id"])
+                        started.append(inst["id"])
                     else:
                         self._log_to_console(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
-                        with lock:
-                            errors.append(inst["id"])
-
-                threads = [threading.Thread(target=start_one, args=(inst,), daemon=True)
-                           for inst in instances]
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join()
+                        errors.append(inst["id"])
 
                 if started:
                     self.root.after(0, lambda s=len(started), total=len(instances):

@@ -390,28 +390,20 @@ def api_server_start():
 
     started = []
     errors = []
-    lock = threading.Lock()
 
-    def start_one(inst):
+    # Sequential startup — ensures NDI sources appear on the network one at a time
+    # in config order, preventing Tricaster/receivers from latching onto the wrong source.
+    for inst in instances:
         m = _make_manager(inst, cfg)
-        with lock:
-            _managers[inst["id"]] = m
+        _managers[inst["id"]] = m
         ok = m.start()
         if ok:
             res = _load_instance(inst, AMCPClient(port=instance_amcp_port(cfg, inst)))
             _log_event(f"Inst {inst['id']} ({inst['name']}) started → {res[:60]}")
-            with lock:
-                started.append(inst["id"])
+            started.append(inst["id"])
         else:
             _log_event(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
-            with lock:
-                errors.append(inst["id"])
-
-    threads = [threading.Thread(target=start_one, args=(inst,), daemon=True) for inst in instances]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+            errors.append(inst["id"])
 
     if not started:
         raise HTTPException(status_code=500, detail="All instances failed to start")
