@@ -67,6 +67,10 @@ class CasparProcessManager:
                 cmd,
                 cwd=self._exe_dir(),
                 startupinfo=si,
+                # Each instance must get its own fresh console, independent of
+                # our Python process's current console attachment (AttachConsole
+                # from a previous instance's thread would otherwise be inherited).
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
             # Poll AMCP every second — move on as soon as it responds.
             # startup_delay is the maximum wait; defaults to 60s so it's
@@ -246,18 +250,11 @@ class CasparProcessManager:
                 except Exception:
                     pass
 
-        # --- AttachConsole + SetConsoleTitleW loop ---
-        # FreeConsole is a no-op for a windowed app with no console.
-        kernel32.FreeConsole()
-        attached = bool(kernel32.AttachConsole(caspar_pid))
-        if not attached:
-            attached = bool(kernel32.AttachConsole(root_pid))
-
-        if attached:
-            while self._process and self._process.poll() is None:
-                kernel32.SetConsoleTitleW(title)
-                time.sleep(1.0)
-            kernel32.FreeConsole()
+        # AttachConsole/SetConsoleTitleW removed: it modifies the Python process's
+        # console attachment globally, causing later Popen calls to inherit the wrong
+        # console and silently fail to start. The cmd /k title command in the launch
+        # string already sets the window title; show_console() falls back to
+        # _find_conhost_hwnd() if FindWindowW by title doesn't match.
 
     @staticmethod
     def _find_hwnd_for_pid(pid: int, visible_only: bool = True):
