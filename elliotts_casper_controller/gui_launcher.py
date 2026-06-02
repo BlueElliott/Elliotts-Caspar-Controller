@@ -648,14 +648,14 @@ class CasperControllerGUI:
                 started = []
                 errors = []
 
-                # Sequential startup — ensures NDI sources appear on the network one at a time
-                # in config order, preventing Tricaster from latching onto the wrong source.
-                for inst in instances:
+                # Sequential startup with 5s gap — NDI sources appear one at a time
+                # in config order so Tricaster locks onto the correct source.
+                for i, inst in enumerate(instances):
                     port = instance_amcp_port(cfg, inst)
                     m = CasparProcessManager(
                         exe_path=exe,
                         amcp_port=port,
-                        startup_delay=cfg["startup_delay"],
+                        startup_delay=cfg.get("startup_delay", 60),
                         window_title=f"PCR3 CasparCG — {inst['name']}",
                         config_filename=f"casparcg_inst_{inst['id']}.config",
                     )
@@ -665,6 +665,8 @@ class CasperControllerGUI:
                         res = self._send_instance_load(inst, AMCPClient(port=port))
                         logger.info(f"Inst {inst['id']} ({inst['name']}) → {res[:60]}")
                         started.append(inst["id"])
+                        if i < len(instances) - 1:
+                            time.sleep(5)  # let NDI source settle before announcing next
                     else:
                         logger.warning(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
                         errors.append(inst["id"])
@@ -701,8 +703,15 @@ class CasperControllerGUI:
 
     def _stop_caspar(self):
         def run():
-            for m in list(self._managers.values()):
-                m.stop()
+            # Stop all managers in parallel for instant response
+            threads = [threading.Thread(target=m.stop, daemon=True)
+                       for m in list(self._managers.values())]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=3)
+            # Kill any stragglers
+            CasparProcessManager._kill_all_caspar_instances()
             self._managers = {}
             self.root.after(0, self._on_caspar_stopped)
 
@@ -766,15 +775,17 @@ class CasperControllerGUI:
                 if has_unmanaged:
                     self.root.after(0, self._try_adopt_instances)
 
-                if overall != self._caspar_running:
-                    self._caspar_running = overall
-                    if overall:
-                        total = len(instances)
-                        self.root.after(0, lambda rc=running_count, tot=total:
-                                        self._status_label.config(
-                                            text=f"CasparCG running — {rc}/{tot} instances", fg=SUCCESS))
-                    else:
-                        self.root.after(0, self._on_caspar_stopped)
+                if overall:
+                    # Always update count so it reflects instances coming up/down during restarts
+                    tot = len(instances)
+                    self.root.after(0, lambda rc=running_count, t=tot:
+                                    self._status_label.config(
+                                        text=f"CasparCG running — {rc}/{t} instances", fg=SUCCESS))
+                    if not self._caspar_running:
+                        self._caspar_running = True
+                elif self._caspar_running:
+                    self._caspar_running = False
+                    self.root.after(0, self._on_caspar_stopped)
             except Exception:
                 pass
             self.root.after(4000, self._poll_caspar_status)

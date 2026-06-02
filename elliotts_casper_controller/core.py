@@ -283,7 +283,7 @@ function api(url, method='GET', body=null) {
 
 
 def nav(active: str) -> str:
-    links = [("Dashboard", "/", "dashboard"), ("Multiviewer", "/multiviewer", "multiviewer"), ("Settings", "/settings", "settings")]
+    links = [("Dashboard", "/", "dashboard"), ("Settings", "/settings", "settings")]
     items = "".join(f'<a href="{href}" class="{"active" if key == active else ""}">{label}</a>' for label, href, key in links)
     return f'<nav class="nav">{items}</nav>'
 
@@ -352,11 +352,22 @@ class ConfigUpdate(BaseModel):
 @app.get("/api/status")
 def api_status():
     cfg = load_config()
+    instances = cfg.get("instances", [])
+
+    # Ping all instances in parallel so response time = slowest single ping, not sum
+    live = {}
+    def _ping(inst):
+        live[inst["id"]] = AMCPClient(port=instance_amcp_port(cfg, inst)).ping()
+    threads = [threading.Thread(target=_ping, args=(inst,), daemon=True) for inst in instances]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=3)
+
     instances_out = []
-    for inst in cfg.get("instances", []):
+    for inst in instances:
         port = instance_amcp_port(cfg, inst)
-        client = AMCPClient(port=port)
-        running = client.ping()
+        running = live.get(inst["id"], False)
         instances_out.append({
             "id": inst["id"],
             "name": inst["name"],
@@ -390,9 +401,9 @@ def api_server_start():
     started = []
     errors = []
 
-    # Sequential startup — ensures NDI sources appear on the network one at a time
-    # in config order, preventing Tricaster/receivers from latching onto the wrong source.
-    for inst in instances:
+    # Sequential startup with 5s gap — ensures NDI sources appear one at a time
+    # in config order so Tricaster/receivers lock onto the correct source.
+    for i, inst in enumerate(instances):
         m = _make_manager(inst, cfg)
         _managers[inst["id"]] = m
         ok = m.start()
@@ -400,6 +411,8 @@ def api_server_start():
             res = _load_instance(inst, AMCPClient(port=instance_amcp_port(cfg, inst)))
             _log_event(f"Inst {inst['id']} ({inst['name']}) started → {res[:60]}")
             started.append(inst["id"])
+            if i < len(instances) - 1:
+                time.sleep(5)  # let NDI source settle before announcing the next one
         else:
             _log_event(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
             errors.append(inst["id"])
@@ -416,10 +429,15 @@ def api_server_start():
 @app.post("/api/server/stop")
 def api_server_stop():
     global _managers
-    cfg = load_config()
-    for m in list(_managers.values()):
-        m.stop()
+    # Stop any managed instances
+    threads = [threading.Thread(target=m.stop, daemon=True) for m in list(_managers.values())]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=3)
     _managers = {}
+    # Kill any remaining CasparCG processes (e.g. started via the desktop GUI)
+    CasparProcessManager._kill_all_caspar_instances()
     _log_event("All CasparCG instances stopped.")
     return {"ok": True}
 
@@ -719,15 +737,17 @@ function renderInstances(instances) {
   }).join('');
 }
 
+// Track whether a media select dropdown is currently open
+let _dropdownOpen = false;
+document.addEventListener('mousedown', e => { if (e.target.tagName === 'SELECT') _dropdownOpen = true; });
+document.addEventListener('change',    e => { if (e.target.tagName === 'SELECT') _dropdownOpen = false; });
+document.addEventListener('focusout',  e => { if (e.target.tagName === 'SELECT') _dropdownOpen = false; });
+
 function updateStatus() {
-  // Don't tear down the DOM while the user has a dropdown open
-  if (document.activeElement && document.activeElement.tagName === 'SELECT') {
-    api('/api/log').then(data => {
-      document.getElementById('log-box').innerHTML = data.log.slice().reverse().map(l => `<p>${l}</p>`).join('');
-    });
-    return;
-  }
   api('/api/status').then(data => {
+    // Check HERE, just before touching the DOM — not before the async fetch
+    const skipRender = _dropdownOpen;
+
     const running = data.running;
     document.getElementById('pulse').className = 'pulse ' + (running ? 'pulse-green' : 'pulse-red');
     const liveCount = data.instances.filter(i => i.status === 'live').length;
@@ -736,19 +756,19 @@ function updateStatus() {
       ? `CasparCG Running — ${liveCount}/${total} instances`
       : 'CasparCG Stopped';
 
-    // Preserve user input across re-renders
-    const saved = {};
-    document.querySelectorAll('[id^="amcp_"], [id^="media_"]').forEach(el => {
-      if (el.value) saved[el.id] = el.value;
-    });
-
-    renderInstances(data.instances);
-    loadMediaClips();
-
-    Object.entries(saved).forEach(([id, val]) => {
-      const el = document.getElementById(id);
-      if (el) el.value = val;
-    });
+    if (!skipRender) {
+      // Preserve user input across re-renders
+      const saved = {};
+      document.querySelectorAll('[id^="amcp_"], [id^="media_"]').forEach(el => {
+        if (el.value) saved[el.id] = el.value;
+      });
+      renderInstances(data.instances);
+      loadMediaClips();
+      Object.entries(saved).forEach(([id, val]) => {
+        const el = document.getElementById(id);
+        if (el) el.value = val;
+      });
+    }
 
     if (lastRunning !== null && lastRunning !== running)
       toast(running ? 'CasparCG is now running' : 'CasparCG stopped', running ? 'success' : 'warning');
@@ -813,56 +833,6 @@ setInterval(updateStatus, 4000);
     return HTMLResponse(page("Dashboard", "dashboard", body, js))
 
 
-@app.get("/multiviewer", response_class=HTMLResponse)
-def page_multiviewer():
-    cfg = load_config()
-    instances = cfg.get("instances", [])
-    frames = ""
-    for inst in instances:
-        type_badge = (
-            '<span class="badge badge-neutral" style="font-size:10px">HTML5</span>'
-            if inst.get("type", "html") == "html"
-            else '<span class="badge badge-warning" style="font-size:10px">Media</span>'
-        )
-        frames += f"""
-<div class="mv-frame">
-  <div style="position:relative;background:#000;height:180px;display:flex;align-items:center;justify-content:center">
-    <img id="stream-{inst['id']}" src="/api/instance/{inst['id']}/stream"
-         style="max-width:100%;max-height:180px;object-fit:contain;display:block"
-         onerror="this.style.display='none';document.getElementById('err-{inst['id']}').style.display='flex'"
-         onload="document.getElementById('err-{inst['id']}').style.display='none'">
-    <div id="err-{inst['id']}" style="display:none;position:absolute;inset:0;align-items:center;
-         justify-content:center;flex-direction:column;gap:6px;color:var(--muted);font-size:12px">
-      <span style="font-size:28px;opacity:.4">▶</span>
-      <span>No signal — is CasparCG running?</span>
-      <button class="btn btn-secondary btn-sm" onclick="reconnect({inst['id']})">Reconnect</button>
-    </div>
-  </div>
-  <div class="mv-label">
-    <span>Inst {inst['id']} — {inst['name']} &nbsp;{type_badge}</span>
-    <span style="color:var(--muted);font-size:11px">{inst.get('ndi_name','')}</span>
-  </div>
-</div>"""
-
-    body = f"""
-<p style="color:var(--muted);margin-bottom:16px">
-  Live NDI output preview via MJPEG — one stream per CasparCG instance. Requires <code>ndi-python</code> and CasparCG running.
-</p>
-<div class="mv-grid">
-{frames}
-</div>
-"""
-    js = """
-function reconnect(id) {
-  const img = document.getElementById('stream-' + id);
-  const err = document.getElementById('err-' + id);
-  if (!img) return;
-  err.style.display = 'none';
-  img.style.display = 'block';
-  img.src = '/api/instance/' + id + '/stream?' + Date.now();
-}
-"""
-    return HTMLResponse(page("Multiviewer", "multiviewer", body, js))
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -904,11 +874,6 @@ def page_settings():
     <div class="form-group">
       <label>Web UI Port</label>
       <input type="number" id="web_port" value="5280">
-    </div>
-    <div class="form-group">
-      <label>Max wait per instance (seconds) <span id="startup-total" style="color:var(--muted);font-size:11px"></span></label>
-      <input type="number" id="startup_delay" value="60" min="10" max="300" oninput="updateStartupTotal()">
-      <p style="color:var(--muted);font-size:11px;margin-top:4px">Each instance starts as soon as its AMCP port responds — this is only the upper limit before giving up.</p>
     </div>
     <div class="form-group" style="display:flex;align-items:center;gap:10px;padding-top:4px">
       <input type="checkbox" id="autostart_caspar"
@@ -954,7 +919,6 @@ function loadSettings() {
     document.getElementById('video_mode').value = cfg.video_mode || '1080p2500';
     document.getElementById('amcp_base_port').value = cfg.amcp_base_port || 5250;
     document.getElementById('web_port').value = cfg.web_port || 5280;
-    document.getElementById('startup_delay').value = cfg.startup_delay || 8;
     document.getElementById('autostart_caspar').checked = !!cfg.autostart_caspar;
     currentInstances = (cfg.instances || []).map(inst => ({
       ...inst,
@@ -964,7 +928,7 @@ function loadSettings() {
       amcp_port: inst.amcp_port || 0,
     }));
     renderInstanceTable(currentInstances);
-    updateStartupTotal();
+  
   });
 }
 
@@ -975,7 +939,7 @@ function computedPort(i) {
 function onBasePortChange() {
   currentInstances = getFormInstances();
   renderInstanceTable(currentInstances);
-  updateStartupTotal();
+
 }
 
 function renderInstanceTable(insts) {
@@ -1046,12 +1010,6 @@ function getFormInstances() {
   });
 }
 
-function updateStartupTotal() {
-  const delay = parseInt(document.getElementById('startup_delay').value) || 8;
-  const n = currentInstances.length;
-  const el = document.getElementById('startup-total');
-  if (el) el.textContent = n > 0 ? `— ~${delay * n}s total for ${n} instances` : '';
-}
 
 function moveUp(i) {
   if (i === 0) return;
@@ -1073,7 +1031,7 @@ function addInstance() {
   currentInstances.push({ id: n, name: 'INST' + n, ndi_name: 'PCR3 INST' + n,
                            type: 'html', url: '', startup_command: '', amcp_port: 0 });
   renderInstanceTable(currentInstances);
-  updateStartupTotal();
+
   toast('Instance added', 'success');
 }
 
@@ -1083,7 +1041,7 @@ function deleteInstance(i) {
   currentInstances = getFormInstances();
   currentInstances.splice(i, 1);
   renderInstanceTable(currentInstances);
-  updateStartupTotal();
+
   toast(name + ' deleted', 'warning');
 }
 
@@ -1100,7 +1058,6 @@ function saveSettings() {
     video_mode:       document.getElementById('video_mode').value,
     amcp_base_port:   parseInt(document.getElementById('amcp_base_port').value),
     web_port:         parseInt(document.getElementById('web_port').value),
-    startup_delay:    parseInt(document.getElementById('startup_delay').value),
     autostart_caspar: document.getElementById('autostart_caspar').checked,
     instances,
   };

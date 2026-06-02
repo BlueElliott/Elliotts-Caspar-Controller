@@ -73,9 +73,8 @@ class CasparProcessManager:
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
             # Poll AMCP every second — move on as soon as it responds.
-            # startup_delay is the maximum wait; defaults to 60s so it's
-            # generous enough for cold starts on slow machines.
-            deadline = time.time() + max(self.startup_delay, 30)
+            # 90s hard timeout handles slow cold starts without hanging forever.
+            deadline = time.time() + 90
             while time.time() < deadline:
                 time.sleep(1)
                 if self._client.ping():
@@ -160,9 +159,9 @@ class CasparProcessManager:
         time.sleep(1.5)
 
     def stop(self) -> None:
-        """Gracefully stop CasparCG then kill only our specific process tree."""
+        """Stop CasparCG: send BYE then immediately kill the process tree."""
         self._client.send("BYE")
-        time.sleep(1.5)
+        time.sleep(0.2)  # brief grace period for graceful shutdown
         if self._process and self._process.poll() is None:
             self._kill_tree(self._process.pid)
         self._process = None
