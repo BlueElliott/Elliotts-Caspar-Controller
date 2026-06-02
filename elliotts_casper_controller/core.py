@@ -283,7 +283,7 @@ function api(url, method='GET', body=null) {
 
 
 def nav(active: str) -> str:
-    links = [("Dashboard", "/", "dashboard"), ("Settings", "/settings", "settings")]
+    links = [("Dashboard", "/", "dashboard"), ("HTTP Generator", "/http-generator", "http-generator"), ("Settings", "/settings", "settings")]
     items = "".join(f'<a href="{href}" class="{"active" if key == active else ""}">{label}</a>' for label, href, key in links)
     return f'<nav class="nav">{items}</nav>'
 
@@ -802,14 +802,8 @@ function renderInstances(instances) {
     const typeBadge = isHtml
       ? '<span class="badge badge-neutral" style="font-size:10px">HTML5</span>'
       : '<span class="badge badge-warning" style="font-size:10px">Media</span>';
-    const sourceInfo = isHtml
-      ? ''
-      : `<div class="ch-ndi" style="color:var(--warning);font-size:11px">${inst.startup_command || '(no startup command)'}</div>`;
-    const loadUrl = !isHtml ? `
-      <div style="font-size:10px;color:var(--muted);font-family:monospace;background:var(--input-bg);
-                  padding:5px 8px;border-radius:6px;word-break:break-all;margin-top:2px">
-        GET /api/load?instance=${encodeURIComponent(inst.name)}&amp;clip=CLIP_NAME
-      </div>` : '';
+    const sourceInfo = '';
+    const loadUrl = '';
     const amcpRow = !isHtml ? `
       <div style="display:flex;gap:4px;margin-top:4px">
         <select id="media_${inst.id}"
@@ -939,6 +933,153 @@ setInterval(updateStatus, 4000);
     return HTMLResponse(page("Dashboard", "dashboard", body, js))
 
 
+
+
+@app.get("/http-generator", response_class=HTMLResponse)
+def page_http_generator():
+    body = """
+<p style="color:var(--muted);margin-bottom:20px">
+  Select an instance and clip to generate a ready-to-use HTTP GET URL.
+  Any device that can fire an HTTP request — browser, automation system, hardware controller — can use it to load a clip instantly.
+</p>
+
+<div class="card">
+  <h2 style="margin-bottom:20px">URL Builder</h2>
+
+  <div class="grid-2" style="margin-bottom:16px">
+    <div class="form-group" style="margin:0">
+      <label>Media Instance</label>
+      <select id="gen-instance" onchange="onSelectionChange()">
+        <option value="">— select instance —</option>
+      </select>
+    </div>
+    <div class="form-group" style="margin:0">
+      <label>Clip</label>
+      <select id="gen-clip" onchange="onSelectionChange()">
+        <option value="">— select clip —</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="form-group" style="margin-bottom:20px">
+    <label>Playback</label>
+    <select id="gen-loop" onchange="onSelectionChange()" style="max-width:220px">
+      <option value="">Loop continuously (default)</option>
+      <option value="false">Play once then stop</option>
+    </select>
+  </div>
+
+  <div id="gen-url-container" style="display:none">
+    <label style="margin-bottom:8px;display:block">Generated URL — click to copy</label>
+    <div id="gen-url" onclick="copyUrl()"
+         style="background:var(--input-bg);border:2px solid var(--border);border-radius:10px;
+                padding:16px 20px;font-family:Consolas,monospace;font-size:13px;
+                cursor:pointer;word-break:break-all;color:var(--accent);
+                transition:border-color 0.2s,background 0.2s"
+         onmouseenter="this.style.borderColor='var(--accent)'"
+         onmouseleave="this.style.borderColor='var(--border)'"
+         title="Click to copy to clipboard">
+    </div>
+    <p id="gen-copied"
+       style="color:var(--success);font-size:13px;margin-top:8px;display:none;font-weight:600">
+      ✓ Copied to clipboard
+    </p>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3 style="margin-bottom:12px">How it works</h3>
+  <p style="color:var(--muted);font-size:13px;line-height:1.7">
+    Send the generated URL as an HTTP GET request from any device on the same network.
+    The app will forward the clip to the selected CasparCG instance immediately.<br><br>
+    Works from a web browser, <code>curl</code>, a Companion button, a touchscreen panel,
+    or any automation system that supports HTTP requests.
+  </p>
+  <div style="margin-top:12px;background:var(--input-bg);border-radius:8px;padding:12px 16px;font-family:Consolas,monospace;font-size:12px;color:var(--muted)">
+    curl "http://YOUR_IP:PORT/api/load?instance=Clipplayer&clip=MYCLIP"
+  </div>
+</div>
+"""
+    js = """
+let _mediaInstances = [];
+let _clips = [];
+
+function loadData() {
+  api('/api/status').then(data => {
+    _mediaInstances = (data.instances || []).filter(i => i.type === 'media');
+    const sel = document.getElementById('gen-instance');
+    if (_mediaInstances.length === 0) {
+      sel.innerHTML = '<option value="">No media instances configured</option>';
+    } else {
+      sel.innerHTML = '<option value="">— select instance —</option>' +
+        _mediaInstances.map(i => `<option value="${i.name}">${i.name}</option>`).join('');
+    }
+    onSelectionChange();
+  });
+  api('/api/media').then(data => {
+    _clips = data.clips || [];
+    const sel = document.getElementById('gen-clip');
+    sel.innerHTML = '<option value="">— select clip —</option>' +
+      _clips.map(c => `<option value="${c}">${c}</option>`).join('');
+    onSelectionChange();
+  });
+}
+
+function onSelectionChange() {
+  const instance = document.getElementById('gen-instance').value;
+  const clip     = document.getElementById('gen-clip').value;
+  const loopVal  = document.getElementById('gen-loop').value;
+  const container = document.getElementById('gen-url-container');
+  const urlEl     = document.getElementById('gen-url');
+
+  if (!instance || !clip) {
+    container.style.display = 'none';
+    return;
+  }
+
+  const base = window.location.origin;
+  let url = `${base}/api/load?instance=${encodeURIComponent(instance)}&clip=${encodeURIComponent(clip)}`;
+  if (loopVal === 'false') url += '&loop=false';
+
+  urlEl.textContent = url;
+  container.style.display = 'block';
+  document.getElementById('gen-copied').style.display = 'none';
+}
+
+function copyUrl() {
+  const url = document.getElementById('gen-url').textContent.trim();
+  if (!url) return;
+  const copied = () => {
+    const el = document.getElementById('gen-copied');
+    el.style.display = 'block';
+    document.getElementById('gen-url').style.background = 'rgba(0,188,212,0.1)';
+    setTimeout(() => {
+      el.style.display = 'none';
+      document.getElementById('gen-url').style.background = 'var(--input-bg)';
+    }, 2000);
+  };
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(copied).catch(() => fallbackCopy(url, copied));
+  } else {
+    fallbackCopy(url, copied);
+  }
+}
+
+function fallbackCopy(text, cb) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try { document.execCommand('copy'); cb(); } catch(e) {}
+  document.body.removeChild(ta);
+}
+
+loadData();
+"""
+    return HTMLResponse(page("HTTP Generator", "http-generator", body, js))
 
 
 @app.get("/settings", response_class=HTMLResponse)
