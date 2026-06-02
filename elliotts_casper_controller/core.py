@@ -382,11 +382,10 @@ def api_server_start():
     # Write all config files before launching
     regenerate_all_instance_configs(cfg)
 
-    # Kill any orphaned CasparCG before launching fresh
-    any_responding = any(AMCPClient(port=instance_amcp_port(cfg, inst)).ping() for inst in instances)
-    if any_responding:
-        CasparProcessManager._kill_all_caspar_instances()
-        time.sleep(1.5)
+    # Always kill every running CasparCG before launching fresh.
+    # Conditional kill (only when AMCP responds) misses instances on stale ports
+    # and causes processes to accumulate across multiple Start clicks.
+    CasparProcessManager._kill_all_caspar_instances()
 
     started = []
     errors = []
