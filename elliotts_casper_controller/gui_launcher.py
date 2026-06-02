@@ -8,9 +8,8 @@ import threading
 import time
 import webbrowser
 import tkinter as tk
-from io import StringIO
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, simpledialog
+from tkinter import messagebox, simpledialog
 
 import psutil
 import pystray
@@ -20,7 +19,7 @@ from elliotts_casper_controller import __version__
 from elliotts_casper_controller.amcp_client import AMCPClient
 from elliotts_casper_controller.config_manager import (
     load as load_config, save as save_config,
-    instance_amcp_port, regenerate_all_instance_configs,
+    instance_amcp_port, regenerate_instance_config, regenerate_all_instance_configs,
 )
 from elliotts_casper_controller.process_manager import CasparProcessManager
 
@@ -83,40 +82,6 @@ WARNING   = "#f59e0b"
 
 
 # ---------------------------------------------------------------------------
-# Console redirect helpers
-# ---------------------------------------------------------------------------
-
-class _ConsoleRedirector:
-    def __init__(self, widget):
-        self._w = widget
-        self._buf = StringIO()
-
-    def write(self, msg):
-        try:
-            self._w.insert(tk.END, msg)
-            self._w.see(tk.END)
-        except Exception:
-            pass
-        self._buf.write(msg)
-
-    def flush(self):
-        pass
-
-
-class _TkLogHandler(logging.Handler):
-    def __init__(self, widget):
-        super().__init__()
-        self._w = widget
-
-    def emit(self, record):
-        try:
-            self._w.insert(tk.END, self.format(record) + "\n")
-            self._w.see(tk.END)
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Main GUI class
 # ---------------------------------------------------------------------------
 
@@ -144,11 +109,6 @@ class CasperControllerGUI:
         self._uvicorn_server = None
 
         self._tray_icon: pystray.Icon | None = None
-        self._console_window = None
-        self._console_text = None
-        self._log_handler = None
-        self._caspar_console_visible = False
-        self._btn_caspar_console = None
         self._caspar_start_time: float | None = None
         self._caspar_runtime_label = None
 
@@ -353,21 +313,13 @@ class CasperControllerGUI:
         row2.pack(pady=4)
         self._btn_web = self._make_btn(row2, "Open Web UI", self._open_browser, BTN_BLUE, h=46, state=tk.DISABLED)
         self._btn_web.pack(side=tk.LEFT, padx=6)
-        self._btn_caspar_console = self._make_btn(
-            row2, "CasparCG Console", self._toggle_caspar_console, BTN_CASPAR, h=46, state=tk.DISABLED)
-        self._btn_caspar_console.pack(side=tk.LEFT, padx=6)
+        self._make_btn(row2, "Hide to Tray", self._hide_to_tray, BTN_GRAY, h=46).pack(side=tk.LEFT, padx=6)
 
         row3 = tk.Frame(btn_area, bg=BG_DARK)
         row3.pack(pady=4)
-        self._btn_console = self._make_btn(row3, "Open Console", self._toggle_console, BTN_GRAY, h=46)
-        self._btn_console.pack(side=tk.LEFT, padx=6)
-        self._make_btn(row3, "Hide to Tray", self._hide_to_tray, BTN_GRAY, h=46).pack(side=tk.LEFT, padx=6)
-
-        row4 = tk.Frame(btn_area, bg=BG_DARK)
-        row4.pack(pady=4)
-        self._btn_update = self._make_btn(row4, "Check for Updates", self._check_updates, ACCENT, h=46)
+        self._btn_update = self._make_btn(row3, "Check for Updates", self._check_updates, ACCENT, h=46)
         self._btn_update.pack(side=tk.LEFT, padx=6)
-        self._make_btn(row4, "Quit", self._on_close, BTN_RED_DK, h=46).pack(side=tk.LEFT, padx=6)
+        self._make_btn(row3, "Quit", self._on_close, BTN_RED_DK, h=46).pack(side=tk.LEFT, padx=6)
 
         # -- Instance restarts --
         inst_outer = tk.Frame(content, bg=BG_DARK)
@@ -768,13 +720,11 @@ class CasperControllerGUI:
     def _on_caspar_started(self, started: int, total: int):
         self._caspar_running = True
         self._caspar_start_time = time.time()
-        self._caspar_console_visible = False
         msg = f"CasparCG running — {started}/{total} instances loaded"
         self._status_label.config(text=msg, fg=SUCCESS)
         self._enable_btn(self._btn_start, self._start_caspar, "Start CasparCG", BTN_GREEN)
         self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
-        self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console, "CasparCG Console", BTN_CASPAR)
-        self._log_to_console(msg)
+        logger.info(msg)
 
     def _on_caspar_failed(self, reason: str):
         self._status_label.config(text="CasparCG failed to start", fg=ERROR)
@@ -795,11 +745,9 @@ class CasperControllerGUI:
     def _on_caspar_stopped(self):
         self._caspar_running = False
         self._caspar_start_time = None
-        self._caspar_console_visible = False
-        self._disable_btn(self._btn_caspar_console, "CasparCG Console")
         self._status_label.config(text="CasparCG stopped", fg=MUTED)
         self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
-        self._log_to_console("CasparCG stopped.")
+        logger.info("CasparCG stopped.")
 
     def _try_adopt_instances(self):
         """Attempt to adopt any running CasparCG instances that we don't manage yet."""
@@ -829,9 +777,7 @@ class CasperControllerGUI:
                 self._status_label.config(
                     text=f"CasparCG running (reconnected {adopted} instance(s))", fg=SUCCESS)
                 self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
-                self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console,
-                                 "CasparCG Console", BTN_CASPAR)
-                self._log_to_console(f"Reconnected to {adopted} CasparCG instance(s).")
+                logger.info(f"Reconnected to {adopted} CasparCG instance(s).")
         except Exception:
             pass
 
@@ -880,121 +826,62 @@ class CasperControllerGUI:
         return client.send(cmd) if cmd else client.send("CLEAR 1")
 
     def _restart_inst(self, inst_id: int, name: str):
+        """Stop the CasparCG process for one instance and relaunch it."""
         def run():
             cfg = load_config()
             inst_map = {i["id"]: i for i in cfg.get("instances", [])}
             inst = inst_map.get(inst_id)
             if not inst:
                 return
+            if inst_id in self._managers:
+                self._managers[inst_id].stop()
+            regenerate_instance_config(cfg, inst)
             port = instance_amcp_port(cfg, inst)
-            client = AMCPClient(port=port)
-            client.stop_channel(1)
-            time.sleep(0.5)
-            res = self._send_instance_load(inst, client)
-            self._log_to_console(f"Inst {inst_id} ({name}) restarted → {res[:60]}")
+            m = CasparProcessManager(
+                exe_path=cfg.get("caspar_exe_path", ""),
+                amcp_port=port,
+                startup_delay=cfg["startup_delay"],
+                window_title=f"PCR3 CasparCG — {inst['name']}",
+                config_filename=f"casparcg_inst_{inst_id}.config",
+            )
+            self._managers[inst_id] = m
+            ok = m.start()
+            if ok:
+                res = self._send_instance_load(inst, AMCPClient(port=port))
+                logger.info(f"Inst {inst_id} ({name}) restarted → {res[:60]}")
+            else:
+                logger.warning(f"Inst {inst_id} ({name}) failed to restart")
+                self._managers.pop(inst_id, None)
         threading.Thread(target=run, daemon=True).start()
 
     def _restart_all(self):
+        """Stop all CasparCG processes and relaunch them sequentially."""
         def run():
             cfg = load_config()
-            for inst in cfg.get("instances", []):
+            instances = cfg.get("instances", [])
+            for inst in instances:
+                if inst["id"] in self._managers:
+                    self._managers[inst["id"]].stop()
+            for inst in instances:
+                regenerate_instance_config(cfg, inst)
                 port = instance_amcp_port(cfg, inst)
-                client = AMCPClient(port=port)
-                client.stop_channel(1)
-                time.sleep(0.3)
-                res = self._send_instance_load(inst, client)
-                self._log_to_console(f"Inst {inst['id']} restarted → {res[:60]}")
+                m = CasparProcessManager(
+                    exe_path=cfg.get("caspar_exe_path", ""),
+                    amcp_port=port,
+                    startup_delay=cfg["startup_delay"],
+                    window_title=f"PCR3 CasparCG — {inst['name']}",
+                    config_filename=f"casparcg_inst_{inst['id']}.config",
+                )
+                self._managers[inst["id"]] = m
+                ok = m.start()
+                if ok:
+                    res = self._send_instance_load(inst, AMCPClient(port=port))
+                    logger.info(f"Inst {inst['id']} restarted → {res[:60]}")
+                else:
+                    logger.warning(f"Inst {inst['id']} failed to restart")
+                    self._managers.pop(inst["id"], None)
         threading.Thread(target=run, daemon=True).start()
 
-    # -----------------------------------------------------------------------
-    # Console window
-    # -----------------------------------------------------------------------
-
-    def _log_to_console(self, msg: str):
-        if self._console_text:
-            try:
-                ts = time.strftime("%H:%M:%S")
-                self._console_text.insert(tk.END, f"[{ts}] {msg}\n")
-                self._console_text.see(tk.END)
-            except Exception:
-                pass
-
-    def _toggle_console(self):
-        try:
-            alive = self._console_window and self._console_window.winfo_exists()
-        except Exception:
-            alive = False
-
-        if not alive:
-            self._console_window = tk.Toplevel(self.root)
-            self._console_window.title("App Log — Elliott's Casper Controller")
-            self._console_window.geometry("800x400")
-            self._console_window.configure(bg=BG_DARK)
-            self._console_window.protocol("WM_DELETE_WINDOW", self._close_console)
-
-            self._console_text = scrolledtext.ScrolledText(
-                self._console_window, bg="#1e1e1e", fg="#d4d4d4",
-                font=("Consolas", 9), relief=tk.FLAT, wrap=tk.WORD,
-            )
-            self._console_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-            self._console_text.insert(tk.END, f"Elliott's Casper Controller v{__version__}\n")
-            self._console_text.insert(tk.END, "=" * 60 + "\n")
-            self._console_text.insert(tk.END,
-                f"Web UI: http://127.0.0.1:{self._web_port}/\n"
-                f"CasparCG: {'Running' if self._caspar_running else 'Stopped'}\n"
-            )
-            self._console_text.insert(tk.END, "=" * 60 + "\n\n")
-
-            sys.stdout = _ConsoleRedirector(self._console_text)
-            sys.stderr = _ConsoleRedirector(self._console_text)
-
-            self._log_handler = _TkLogHandler(self._console_text)
-            self._log_handler.setFormatter(logging.Formatter(
-                "%(asctime)s %(levelname)s  %(message)s", datefmt="%H:%M:%S"
-            ))
-            logging.getLogger().addHandler(self._log_handler)
-            logging.getLogger().setLevel(logging.INFO)
-
-            self._redraw_btn(self._btn_console, "Close Console", BTN_BLUE)
-            self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
-        else:
-            self._close_console()
-
-    def _close_console(self):
-        if self._log_handler:
-            logging.getLogger().removeHandler(self._log_handler)
-            self._log_handler = None
-        if self._console_window:
-            try:
-                self._console_window.destroy()
-            except Exception:
-                pass
-        self._console_window = None
-        self._console_text = None
-        sys.stdout = sys.__stdout__
-        sys.stderr = sys.__stderr__
-        self._redraw_btn(self._btn_console, "Open Console", BTN_GRAY)
-        self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
-
-    def _toggle_caspar_console(self):
-        """Show/hide the native CasparCG cmd window for the first managed instance."""
-        m = next(iter(self._managers.values()), None) if self._managers else None
-        if not m:
-            return
-        if self._caspar_console_visible:
-            m.hide_console()
-            self._caspar_console_visible = False
-            self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console,
-                             "CasparCG Console", BTN_CASPAR)
-        else:
-            ok = m.show_console()
-            if ok:
-                self._caspar_console_visible = True
-                self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console,
-                                 "Hide Console", BTN_GRAY)
-            else:
-                self._log_to_console("CasparCG console window not found yet — try again in a moment.")
 
     # -----------------------------------------------------------------------
     # Tray / close

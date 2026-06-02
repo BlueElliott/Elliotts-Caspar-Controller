@@ -424,35 +424,52 @@ def api_server_stop():
     return {"ok": True}
 
 
+def _restart_instance_bg(inst_id: int):
+    """Stop the CasparCG process for one instance and relaunch it. Runs in a thread."""
+    global _managers
+    cfg = load_config()
+    inst_map = {i["id"]: i for i in cfg.get("instances", [])}
+    inst = inst_map.get(inst_id)
+    if not inst:
+        return
+    if inst_id in _managers:
+        _managers[inst_id].stop()
+    regenerate_instance_config(cfg, inst)
+    m = _make_manager(inst, cfg)
+    _managers[inst_id] = m
+    ok = m.start()
+    if ok:
+        res = _load_instance(inst, AMCPClient(port=instance_amcp_port(cfg, inst)))
+        _log_event(f"Inst {inst_id} ({inst['name']}) restarted → {res[:60]}")
+    else:
+        _log_event(f"Inst {inst_id} ({inst['name']}) failed to restart")
+        _managers.pop(inst_id, None)
+
+
 @app.post("/api/instance/{inst_id}/restart")
 def api_instance_restart(inst_id: int):
     cfg = load_config()
     inst_map = {i["id"]: i for i in cfg.get("instances", [])}
     if inst_id not in inst_map:
         raise HTTPException(status_code=404, detail=f"Instance {inst_id} not found")
-    inst = inst_map[inst_id]
-    port = instance_amcp_port(cfg, inst)
-    client = AMCPClient(port=port)
-    client.stop_channel(1)
-    time.sleep(0.5)
-    res = _load_instance(inst, client)
-    _log_event(f"Inst {inst_id} ({inst['name']}) restarted → {res[:60]}")
-    return {"ok": True, "response": res}
+    name = inst_map[inst_id]["name"]
+    _log_event(f"Restarting inst {inst_id} ({name})...")
+    threading.Thread(target=_restart_instance_bg, args=(inst_id,), daemon=True).start()
+    return {"ok": True, "message": f"Restarting {name}..."}
 
 
 @app.post("/api/instance/all/restart")
 def api_instance_restart_all():
     cfg = load_config()
-    results = []
-    for inst in cfg.get("instances", []):
-        port = instance_amcp_port(cfg, inst)
-        client = AMCPClient(port=port)
-        client.stop_channel(1)
-        time.sleep(0.3)
-        res = _load_instance(inst, client)
-        _log_event(f"Inst {inst['id']} restarted → {res[:60]}")
-        results.append({"id": inst["id"], "response": res})
-    return {"ok": True, "results": results}
+    instances = cfg.get("instances", [])
+
+    def _do_all():
+        for inst in instances:
+            _restart_instance_bg(inst["id"])
+
+    _log_event("Restarting all instances...")
+    threading.Thread(target=_do_all, daemon=True).start()
+    return {"ok": True, "message": "Restarting all instances..."}
 
 
 class AMCPCommandRequest(BaseModel):
@@ -693,7 +710,10 @@ function renderInstances(instances) {
       <div class="ch-ndi">NDI: ${inst.ndi_name}</div>
       ${sourceInfo}
       <span class="badge ${inst.status === 'live' ? 'badge-success' : 'badge-error'}">${inst.status}</span>
-      <button class="btn btn-danger btn-sm" onclick="restartInstance(${inst.id}, '${inst.name}')">Restart</button>
+      ${inst.status === 'live'
+        ? `<button class="btn btn-warning btn-sm" onclick="restartInstance(${inst.id}, '${inst.name}')">↺ Restart</button>`
+        : `<button class="btn btn-success btn-sm" onclick="restartInstance(${inst.id}, '${inst.name}')">▶ Start</button>`
+      }
       ${amcpRow}
     </div>`;
   }).join('');
@@ -741,10 +761,25 @@ function serverAction(action) {
 }
 
 function restartInstance(id, name) {
-  toast('Restarting ' + name + '...', 'warning');
-  api('/api/instance/' + id + '/restart', 'POST').then(() => {
-    toast(name + ' restarted', 'success');
-    updateStatus();
+  toast('Restarting ' + name + ' — stopping process...', 'warning');
+  api('/api/instance/' + id + '/restart', 'POST').then(d => {
+    toast(d.message || (name + ' restarting...'), 'info');
+    // Poll until it comes back live
+    let attempts = 0;
+    const poll = setInterval(() => {
+      attempts++;
+      updateStatus();
+      api('/api/status').then(data => {
+        const inst = data.instances.find(i => i.id === id);
+        if (inst && inst.status === 'live') {
+          clearInterval(poll);
+          toast(name + ' is live', 'success');
+        } else if (attempts > 90) {
+          clearInterval(poll);
+          toast(name + ' took too long — check logs', 'warning');
+        }
+      });
+    }, 2000);
   }).catch(() => toast('Failed to restart ' + name, 'error'));
 }
 

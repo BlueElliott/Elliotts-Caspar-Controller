@@ -115,7 +115,7 @@ def caspar_instance_config_path(config: dict, inst: dict) -> str:
 def regenerate_instance_config(config: dict, inst: dict) -> str:
     """Write a single-channel casparcg.config for one instance. Returns the path written.
 
-    Each instance gets its own log\ and data\ subdirectory to prevent file-locking
+    Each instance gets its own log/inst_N and data/inst_N subdirectory to prevent file-locking
     conflicts when multiple CasparCG processes run from the same folder simultaneously.
     """
     port = instance_amcp_port(config, inst)
