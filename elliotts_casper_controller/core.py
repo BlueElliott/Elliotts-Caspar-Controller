@@ -14,7 +14,7 @@ from elliotts_casper_controller import __version__
 from elliotts_casper_controller.amcp_client import AMCPClient
 from elliotts_casper_controller.config_manager import (
     load as load_config, save as save_config,
-    regenerate_caspar_config, import_from_caspar_config,
+    instance_amcp_port, regenerate_instance_config, regenerate_all_instance_configs,
 )
 from elliotts_casper_controller.process_manager import CasparProcessManager
 
@@ -23,9 +23,8 @@ from elliotts_casper_controller.process_manager import CasparProcessManager
 # ---------------------------------------------------------------------------
 
 _config = load_config()
-_client: Optional[AMCPClient] = None
-_manager: Optional[CasparProcessManager] = None
-_log: list[str] = []
+_managers: dict = {}   # inst_id -> CasparProcessManager
+_log: list = []
 _log_lock = threading.Lock()
 
 MAX_LOG = 200
@@ -39,16 +38,23 @@ def _log_event(msg: str) -> None:
             _log.pop(0)
 
 
-def _get_manager() -> CasparProcessManager:
-    global _manager, _client, _config
-    _config = load_config()
-    _client = AMCPClient(port=_config["amcp_port"])
-    _manager = CasparProcessManager(
-        exe_path=_config["caspar_exe_path"],
-        amcp_port=_config["amcp_port"],
-        startup_delay=_config["startup_delay"],
+def _make_manager(inst: dict, cfg: dict) -> CasparProcessManager:
+    port = instance_amcp_port(cfg, inst)
+    return CasparProcessManager(
+        exe_path=cfg["caspar_exe_path"],
+        amcp_port=port,
+        startup_delay=cfg["startup_delay"],
+        window_title=f"PCR3 CasparCG — {inst['name']}",
+        config_filename=f"casparcg_inst_{inst['id']}.config",
     )
-    return _manager
+
+
+def _load_instance(inst: dict, client: AMCPClient) -> str:
+    """Send the startup command for an instance (always channel 1 in each CasparCG process)."""
+    if inst.get("type", "html") == "html":
+        return client.play_html(1, inst.get("url", ""))
+    cmd = inst.get("startup_command", "").strip()
+    return client.send(cmd) if cmd else client.send("CLEAR 1")
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +63,8 @@ def _get_manager() -> CasparProcessManager:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _get_manager()
+    global _config
+    _config = load_config()
     yield
 
 
@@ -201,7 +208,7 @@ label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px
 .toast-info    { border-color: var(--accent);  }
 @keyframes slide-in { from { transform: translateX(110%); } to { transform: translateX(0); } }
 
-/* CHANNEL EDIT CARD (settings page) */
+/* INSTANCE EDIT CARD (settings page) */
 .ch-edit-card {
   background: var(--input-bg); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
@@ -216,7 +223,7 @@ label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px
   padding: 7px 10px; font-size: 13px;
 }
 
-/* CHANNEL CARD (dashboard) */
+/* INSTANCE CARD (dashboard) */
 .channel-card {
   background: var(--card); border: 1px solid var(--border);
   border-radius: 12px; padding: 16px; display: flex;
@@ -312,11 +319,8 @@ from fastapi.responses import FileResponse
 
 
 def _app_root() -> str:
-    """Return the root directory containing static/ — works both frozen and from source."""
     if getattr(sys, "frozen", False):
-        # PyInstaller extracts everything to sys._MEIPASS
         return sys._MEIPASS
-    # Running from source: go up one level from elliotts_casper_controller/
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -337,95 +341,126 @@ def static_file(filename: str):
 
 class ConfigUpdate(BaseModel):
     caspar_exe_path: Optional[str] = None
-    amcp_port: Optional[int] = None
+    amcp_base_port: Optional[int] = None
     web_port: Optional[int] = None
     startup_delay: Optional[int] = None
     video_mode: Optional[str] = None
     autostart_caspar: Optional[bool] = None
-    channels: Optional[list] = None
+    instances: Optional[list] = None
 
 
 @app.get("/api/status")
 def api_status():
     cfg = load_config()
-    client = AMCPClient(port=cfg["amcp_port"])
-    running = client.ping()
-    channels = []
-    for ch in cfg["channels"]:
-        info = client.info_channel(ch["number"]) if running else ""
-        channels.append({
-            "number": ch["number"],
-            "name": ch["name"],
-            "ndi_name": ch["ndi_name"],
-            "type": ch.get("type", "html"),
-            "url": ch.get("url", ""),
-            "startup_command": ch.get("startup_command", ""),
-            "status": "live" if (running and not info.startswith("ERROR")) else "stopped",
+    instances_out = []
+    for inst in cfg.get("instances", []):
+        port = instance_amcp_port(cfg, inst)
+        client = AMCPClient(port=port)
+        running = client.ping()
+        instances_out.append({
+            "id": inst["id"],
+            "name": inst["name"],
+            "ndi_name": inst["ndi_name"],
+            "type": inst.get("type", "html"),
+            "url": inst.get("url", ""),
+            "startup_command": inst.get("startup_command", ""),
+            "amcp_port": port,
+            "status": "live" if running else "stopped",
         })
-    return {"running": running, "version": __version__, "channels": channels}
-
-
-def _load_channel(ch: dict, client: AMCPClient) -> str:
-    """Send the correct startup command for a channel based on its type."""
-    ch_type = ch.get("type", "html")
-    n = ch["number"]
-    if ch_type == "html":
-        return client.play_html(n, ch.get("url", ""))
-    cmd = ch.get("startup_command", "").strip()
-    return client.send(cmd) if cmd else client.send(f"CLEAR {n}")
+    any_running = any(i["status"] == "live" for i in instances_out)
+    return {"running": any_running, "version": __version__, "instances": instances_out}
 
 
 @app.post("/api/server/start")
 def api_server_start():
-    m = _get_manager()
-    _log_event("Starting CasparCG...")
-    ok = m.start()
-    if ok:
-        cfg = load_config()
-        client = AMCPClient(port=cfg["amcp_port"])
-        for ch in cfg["channels"]:
-            res = _load_channel(ch, client)
-            _log_event(f"CH{ch['number']} ({ch['name']}) load -> {res[:60]}")
-        _log_event("CasparCG started and channels loaded.")
-        return {"ok": True, "message": "CasparCG started"}
-    _log_event("CasparCG failed to start.")
-    raise HTTPException(status_code=500, detail="Failed to start CasparCG")
+    global _managers
+    cfg = load_config()
+    instances = cfg.get("instances", [])
+    if not instances:
+        raise HTTPException(status_code=400, detail="No instances configured")
+
+    # Write all config files before launching
+    regenerate_all_instance_configs(cfg)
+
+    # Kill any orphaned CasparCG before launching fresh
+    any_responding = any(AMCPClient(port=instance_amcp_port(cfg, inst)).ping() for inst in instances)
+    if any_responding:
+        CasparProcessManager._kill_all_caspar_instances()
+        time.sleep(1.5)
+
+    started = []
+    errors = []
+    lock = threading.Lock()
+
+    def start_one(inst):
+        m = _make_manager(inst, cfg)
+        with lock:
+            _managers[inst["id"]] = m
+        ok = m.start()
+        if ok:
+            res = _load_instance(inst, AMCPClient(port=instance_amcp_port(cfg, inst)))
+            _log_event(f"Inst {inst['id']} ({inst['name']}) started → {res[:60]}")
+            with lock:
+                started.append(inst["id"])
+        else:
+            _log_event(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
+            with lock:
+                errors.append(inst["id"])
+
+    threads = [threading.Thread(target=start_one, args=(inst,), daemon=True) for inst in instances]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    if not started:
+        raise HTTPException(status_code=500, detail="All instances failed to start")
+    msg = f"Started {len(started)}/{len(instances)} instances"
+    if errors:
+        msg += f" (failed: {errors})"
+    _log_event(msg)
+    return {"ok": True, "message": msg}
 
 
 @app.post("/api/server/stop")
 def api_server_stop():
-    m = _get_manager()
-    m.stop()
-    _log_event("CasparCG stopped.")
+    global _managers
+    cfg = load_config()
+    for m in list(_managers.values()):
+        m.stop()
+    _managers = {}
+    _log_event("All CasparCG instances stopped.")
     return {"ok": True}
 
 
-@app.post("/api/channel/{number}/restart")
-def api_channel_restart(number: int):
+@app.post("/api/instance/{inst_id}/restart")
+def api_instance_restart(inst_id: int):
     cfg = load_config()
-    channels = {ch["number"]: ch for ch in cfg["channels"]}
-    if number not in channels:
-        raise HTTPException(status_code=404, detail=f"Channel {number} not found")
-    ch = channels[number]
-    client = AMCPClient(port=cfg["amcp_port"])
-    client.stop_channel(number)
+    inst_map = {i["id"]: i for i in cfg.get("instances", [])}
+    if inst_id not in inst_map:
+        raise HTTPException(status_code=404, detail=f"Instance {inst_id} not found")
+    inst = inst_map[inst_id]
+    port = instance_amcp_port(cfg, inst)
+    client = AMCPClient(port=port)
+    client.stop_channel(1)
     time.sleep(0.5)
-    res = _load_channel(ch, client)
-    _log_event(f"CH{number} ({ch['name']}) restarted -> {res[:60]}")
+    res = _load_instance(inst, client)
+    _log_event(f"Inst {inst_id} ({inst['name']}) restarted → {res[:60]}")
     return {"ok": True, "response": res}
 
 
-@app.post("/api/channel/all/restart")
-def api_channel_restart_all():
+@app.post("/api/instance/all/restart")
+def api_instance_restart_all():
     cfg = load_config()
-    client = AMCPClient(port=cfg["amcp_port"])
     results = []
-    for ch in cfg["channels"]:
-        client.stop_channel(ch["number"])
+    for inst in cfg.get("instances", []):
+        port = instance_amcp_port(cfg, inst)
+        client = AMCPClient(port=port)
+        client.stop_channel(1)
         time.sleep(0.3)
-        res = _load_channel(ch, client)
-        _log_event(f"CH{ch['number']} restarted -> {res[:60]}")
-        results.append({"number": ch["number"], "response": res})
+        res = _load_instance(inst, client)
+        _log_event(f"Inst {inst['id']} restarted → {res[:60]}")
+        results.append({"id": inst["id"], "response": res})
     return {"ok": True, "results": results}
 
 
@@ -433,18 +468,22 @@ class AMCPCommandRequest(BaseModel):
     command: str
 
 
-@app.post("/api/channel/{number}/amcp")
-def api_channel_amcp(number: int, req: AMCPCommandRequest):
+@app.post("/api/instance/{inst_id}/amcp")
+def api_instance_amcp(inst_id: int, req: AMCPCommandRequest):
     cfg = load_config()
-    client = AMCPClient(port=cfg["amcp_port"])
+    inst_map = {i["id"]: i for i in cfg.get("instances", [])}
+    if inst_id not in inst_map:
+        raise HTTPException(status_code=404, detail=f"Instance {inst_id} not found")
+    port = instance_amcp_port(cfg, inst_map[inst_id])
+    client = AMCPClient(port=port)
     res = client.send(req.command.strip())
-    _log_event(f"CH{number} AMCP: {req.command[:60]} -> {res[:60]}")
+    _log_event(f"Inst {inst_id} AMCP: {req.command[:60]} → {res[:60]}")
     return {"ok": True, "response": res}
 
 
-@app.get("/api/channel/{number}/stream")
-def api_channel_stream(number: int):
-    """Live MJPEG stream of a CasparCG NDI output via ndi-python."""
+@app.get("/api/instance/{inst_id}/stream")
+def api_instance_stream(inst_id: int):
+    """Live MJPEG stream of a CasparCG instance's NDI output via ndi-python."""
     from fastapi.responses import StreamingResponse as _SR
     try:
         import NDIlib as ndi
@@ -456,10 +495,10 @@ def api_channel_stream(number: int):
         )
 
     cfg = load_config()
-    channels = {ch["number"]: ch for ch in cfg["channels"]}
-    if number not in channels:
-        raise HTTPException(status_code=404, detail=f"Channel {number} not found")
-    ndi_name = channels[number].get("ndi_name", "")
+    inst_map = {i["id"]: i for i in cfg.get("instances", [])}
+    if inst_id not in inst_map:
+        raise HTTPException(status_code=404, detail=f"Instance {inst_id} not found")
+    ndi_name = inst_map[inst_id].get("ndi_name", "")
 
     def _generate():
         from PIL import Image
@@ -473,7 +512,6 @@ def api_channel_stream(number: int):
             ndi.destroy()
             return
 
-        # Locate the NDI source by name (up to 5 s)
         source = None
         for _ in range(50):
             ndi.find_wait_for_sources(find, 100)
@@ -508,7 +546,7 @@ def api_channel_stream(number: int):
                     try:
                         arr = np.copy(v.data)
                         ndi.recv_free_video_v2(recv, v)
-                        img = Image.fromarray(arr[:, :, :3])  # RGBX → RGB
+                        img = Image.fromarray(arr[:, :, :3])
                         buf = _io.BytesIO()
                         img.save(buf, format="JPEG", quality=80)
                         jpg = buf.getvalue()
@@ -533,7 +571,6 @@ def api_channel_stream(number: int):
 
 @app.get("/api/media")
 def api_media():
-    """List clip names from CasparCG's media folder (relative paths, no extension)."""
     cfg = load_config()
     exe = cfg.get("caspar_exe_path", "")
     if not exe or not os.path.isfile(exe):
@@ -563,14 +600,14 @@ def api_config_get():
 def api_config_post(update: ConfigUpdate):
     cfg = load_config()
     data = update.model_dump(exclude_none=True)
-    # Renumber channels by array order so the web UI can reorder freely
-    if "channels" in data:
-        for i, ch in enumerate(data["channels"], start=1):
-            ch["number"] = i
+    # Renumber instances by array order so the web UI can reorder freely
+    if "instances" in data:
+        for i, inst in enumerate(data["instances"], start=1):
+            inst["id"] = i
     cfg.update(data)
     save_config(cfg)
-    regenerate_caspar_config(cfg)
-    _log_event("Config saved and casparcg.config regenerated.")
+    regenerate_all_instance_configs(cfg)
+    _log_event("Config saved and instance configs regenerated.")
     return {"ok": True}
 
 
@@ -578,26 +615,6 @@ def api_config_post(update: ConfigUpdate):
 def api_log():
     with _log_lock:
         return {"log": list(_log)}
-
-
-class ImportConfigRequest(BaseModel):
-    path: str
-
-
-@app.post("/api/config/import")
-def api_config_import(req: ImportConfigRequest):
-    import os
-    if not os.path.isfile(req.path):
-        raise HTTPException(status_code=404, detail=f"File not found: {req.path}")
-    try:
-        cfg = load_config()
-        merged = import_from_caspar_config(req.path, cfg)
-        save_config(merged)
-        regenerate_caspar_config(merged)
-        _log_event(f"Imported casparcg.config from {req.path}")
-        return {"ok": True, "video_mode": merged["video_mode"], "amcp_port": merged["amcp_port"]}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -615,13 +632,13 @@ def page_dashboard():
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-success" onclick="serverAction('start')">Start CasparCG</button>
-      <button class="btn btn-danger" onclick="serverAction('stop')">Stop CasparCG</button>
-      <button class="btn btn-warning" onclick="restartAll()">Restart All Channels</button>
+      <button class="btn btn-danger"  onclick="serverAction('stop')">Stop CasparCG</button>
+      <button class="btn btn-warning" onclick="restartAll()">Restart All</button>
     </div>
   </div>
 </div>
 
-<div id="channel-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px"></div>
+<div id="instance-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px"></div>
 
 <div class="card">
   <h3 style="margin-bottom:10px">Event Log</h3>
@@ -630,14 +647,13 @@ def page_dashboard():
 """
     js = """
 let lastRunning = null;
-
 let _mediaClips = [];
 
 function loadMediaClips() {
   api('/api/media').then(data => {
     _mediaClips = data.clips || [];
     document.querySelectorAll('[id^="media_"]').forEach(sel => {
-      const ch = sel.id.split('_')[1];
+      const id = sel.id.split('_')[1];
       const current = sel.value;
       sel.innerHTML = '<option value="">— pick a clip —</option>' +
         _mediaClips.map(c => `<option value="${c}"${c===current?' selected':''}>${c}</option>`).join('');
@@ -645,48 +661,48 @@ function loadMediaClips() {
   });
 }
 
-function onMediaSelect(n) {
-  const sel = document.getElementById('media_' + n);
+function onMediaSelect(id) {
+  const sel = document.getElementById('media_' + id);
   const clip = sel.value;
   if (!clip) return;
-  document.getElementById('amcp_' + n).value = `PLAY ${n}-1 "${clip}" LOOP`;
+  document.getElementById('amcp_' + id).value = `PLAY 1-1 "${clip}" LOOP`;
 }
 
-function renderChannels(channels) {
-  const g = document.getElementById('channel-grid');
-  g.innerHTML = channels.map(ch => {
-    const isHtml  = ch.type === 'html' || !ch.type;
+function renderInstances(instances) {
+  const g = document.getElementById('instance-grid');
+  g.innerHTML = instances.map(inst => {
+    const isHtml = inst.type === 'html' || !inst.type;
     const typeBadge = isHtml
       ? '<span class="badge badge-neutral" style="font-size:10px">HTML5</span>'
       : '<span class="badge badge-warning" style="font-size:10px">Media</span>';
     const sourceInfo = isHtml
-      ? `<div class="ch-ndi" title="${ch.url}" style="word-break:break-all;font-size:11px">${ch.url ? ch.url.replace(/^https?:\\/\\//, '').substring(0,45)+(ch.url.length>52?'...':'') : '(no url)'}</div>`
-      : `<div class="ch-ndi" style="color:var(--warning);font-size:11px">${ch.startup_command || '(no startup command)'}</div>`;
+      ? `<div class="ch-ndi" title="${inst.url}" style="word-break:break-all;font-size:11px">${inst.url ? inst.url.replace(/^https?:\\/\\//, '').substring(0,45)+(inst.url.length>52?'...':'') : '(no url)'}</div>`
+      : `<div class="ch-ndi" style="color:var(--warning);font-size:11px">${inst.startup_command || '(no startup command)'}</div>`;
     const amcpRow = !isHtml ? `
       <div style="display:flex;gap:4px;margin-top:4px">
-        <select id="media_${ch.number}"
+        <select id="media_${inst.id}"
                 style="flex:1;font-size:11px;padding:5px 8px;min-width:0;background:var(--input-bg);color:var(--muted);border:1px solid var(--border);border-radius:6px"
-                onchange="onMediaSelect(${ch.number})">
+                onchange="onMediaSelect(${inst.id})">
           <option value="">— pick a clip —</option>
         </select>
       </div>
       <div style="display:flex;gap:4px;margin-top:4px">
-        <input type="text" id="amcp_${ch.number}" placeholder="PLAY ${ch.number}-1 CLIP LOOP"
+        <input type="text" id="amcp_${inst.id}" placeholder='PLAY 1-1 "CLIP" LOOP'
                style="flex:1;font-size:11px;padding:5px 8px;min-width:0">
         <button class="btn btn-secondary btn-sm" style="padding:0 10px;flex-shrink:0"
-                onclick="sendAmcp(${ch.number})">Send</button>
+                onclick="sendAmcp(${inst.id})">Send</button>
       </div>` : '';
     return `
     <div class="channel-card">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <div class="ch-num">Channel ${ch.number}</div>
+        <div class="ch-num">Instance ${inst.id} &nbsp;<span style="color:var(--muted);font-size:10px">:${inst.amcp_port}</span></div>
         ${typeBadge}
       </div>
-      <div class="ch-name">${ch.name}</div>
-      <div class="ch-ndi">NDI: ${ch.ndi_name}</div>
+      <div class="ch-name">${inst.name}</div>
+      <div class="ch-ndi">NDI: ${inst.ndi_name}</div>
       ${sourceInfo}
-      <span class="badge ${ch.status === 'live' ? 'badge-success' : 'badge-error'}">${ch.status}</span>
-      <button class="btn btn-danger btn-sm" onclick="restartChannel(${ch.number}, '${ch.name}')">Restart</button>
+      <span class="badge ${inst.status === 'live' ? 'badge-success' : 'badge-error'}">${inst.status}</span>
+      <button class="btn btn-danger btn-sm" onclick="restartInstance(${inst.id}, '${inst.name}')">Restart</button>
       ${amcpRow}
     </div>`;
   }).join('');
@@ -696,7 +712,11 @@ function updateStatus() {
   api('/api/status').then(data => {
     const running = data.running;
     document.getElementById('pulse').className = 'pulse ' + (running ? 'pulse-green' : 'pulse-red');
-    document.getElementById('server-status-label').textContent = running ? 'CasparCG Running' : 'CasparCG Stopped';
+    const liveCount = data.instances.filter(i => i.status === 'live').length;
+    const total = data.instances.length;
+    document.getElementById('server-status-label').textContent = running
+      ? `CasparCG Running — ${liveCount}/${total} instances`
+      : 'CasparCG Stopped';
 
     // Preserve user input across re-renders
     const saved = {};
@@ -704,10 +724,9 @@ function updateStatus() {
       if (el.value) saved[el.id] = el.value;
     });
 
-    renderChannels(data.channels);
+    renderInstances(data.instances);
     loadMediaClips();
 
-    // Restore preserved values
     Object.entries(saved).forEach(([id, val]) => {
       const el = document.getElementById(id);
       if (el) el.value = val;
@@ -730,28 +749,28 @@ function serverAction(action) {
   }).catch(() => toast('Failed to ' + action, 'error'));
 }
 
-function restartChannel(n, name) {
+function restartInstance(id, name) {
   toast('Restarting ' + name + '...', 'warning');
-  api('/api/channel/' + n + '/restart', 'POST').then(() => {
+  api('/api/instance/' + id + '/restart', 'POST').then(() => {
     toast(name + ' restarted', 'success');
     updateStatus();
   }).catch(() => toast('Failed to restart ' + name, 'error'));
 }
 
 function restartAll() {
-  toast('Restarting all channels...', 'warning');
-  api('/api/channel/all/restart', 'POST').then(() => {
-    toast('All channels restarted', 'success');
+  toast('Restarting all instances...', 'warning');
+  api('/api/instance/all/restart', 'POST').then(() => {
+    toast('All instances restarted', 'success');
     updateStatus();
   }).catch(() => toast('Failed', 'error'));
 }
 
-function sendAmcp(n) {
-  const input = document.getElementById('amcp_' + n);
+function sendAmcp(id) {
+  const input = document.getElementById('amcp_' + id);
   const cmd = input.value.trim();
   if (!cmd) { toast('Enter an AMCP command first', 'warning'); return; }
-  api('/api/channel/' + n + '/amcp', 'POST', { command: cmd }).then(d => {
-    toast('CH' + n + ': ' + (d.response || 'OK'), 'success');
+  api('/api/instance/' + id + '/amcp', 'POST', { command: cmd }).then(d => {
+    toast('Inst' + id + ': ' + (d.response || 'OK'), 'success');
   }).catch(() => toast('Failed to send AMCP', 'error'));
 }
 
@@ -764,50 +783,50 @@ setInterval(updateStatus, 4000);
 @app.get("/multiviewer", response_class=HTMLResponse)
 def page_multiviewer():
     cfg = load_config()
-    channels = cfg["channels"]
+    instances = cfg.get("instances", [])
     frames = ""
-    for ch in channels:
+    for inst in instances:
         type_badge = (
             '<span class="badge badge-neutral" style="font-size:10px">HTML5</span>'
-            if ch.get("type", "html") == "html"
+            if inst.get("type", "html") == "html"
             else '<span class="badge badge-warning" style="font-size:10px">Media</span>'
         )
         frames += f"""
 <div class="mv-frame">
   <div style="position:relative;background:#000;height:180px;display:flex;align-items:center;justify-content:center">
-    <img id="stream-{ch['number']}" src="/api/channel/{ch['number']}/stream"
+    <img id="stream-{inst['id']}" src="/api/instance/{inst['id']}/stream"
          style="max-width:100%;max-height:180px;object-fit:contain;display:block"
-         onerror="this.style.display='none';document.getElementById('err-{ch['number']}').style.display='flex'"
-         onload="document.getElementById('err-{ch['number']}').style.display='none'">
-    <div id="err-{ch['number']}" style="display:none;position:absolute;inset:0;align-items:center;
+         onerror="this.style.display='none';document.getElementById('err-{inst['id']}').style.display='flex'"
+         onload="document.getElementById('err-{inst['id']}').style.display='none'">
+    <div id="err-{inst['id']}" style="display:none;position:absolute;inset:0;align-items:center;
          justify-content:center;flex-direction:column;gap:6px;color:var(--muted);font-size:12px">
       <span style="font-size:28px;opacity:.4">▶</span>
       <span>No signal — is CasparCG running?</span>
-      <button class="btn btn-secondary btn-sm" onclick="reconnect({ch['number']})">Reconnect</button>
+      <button class="btn btn-secondary btn-sm" onclick="reconnect({inst['id']})">Reconnect</button>
     </div>
   </div>
   <div class="mv-label">
-    <span>CH{ch['number']} — {ch['name']} &nbsp;{type_badge}</span>
-    <span style="color:var(--muted);font-size:11px">{ch.get('ndi_name','')}</span>
+    <span>Inst {inst['id']} — {inst['name']} &nbsp;{type_badge}</span>
+    <span style="color:var(--muted);font-size:11px">{inst.get('ndi_name','')}</span>
   </div>
 </div>"""
 
     body = f"""
 <p style="color:var(--muted);margin-bottom:16px">
-  Live NDI output preview via MJPEG — all channel types. Requires <code>ndi-python</code> and CasparCG running.
+  Live NDI output preview via MJPEG — one stream per CasparCG instance. Requires <code>ndi-python</code> and CasparCG running.
 </p>
 <div class="mv-grid">
 {frames}
 </div>
 """
     js = """
-function reconnect(n) {
-  const img = document.getElementById('stream-' + n);
-  const err = document.getElementById('err-' + n);
+function reconnect(id) {
+  const img = document.getElementById('stream-' + id);
+  const err = document.getElementById('err-' + id);
   if (!img) return;
   err.style.display = 'none';
   img.style.display = 'block';
-  img.src = '/api/channel/' + n + '/stream?' + Date.now();
+  img.src = '/api/instance/' + id + '/stream?' + Date.now();
 }
 """
     return HTMLResponse(page("Multiviewer", "multiviewer", body, js))
@@ -827,27 +846,11 @@ def page_settings():
     <button class="btn btn-primary" onclick="saveExePath()" style="flex-shrink:0">Save Path</button>
   </div>
   <p style="color:var(--muted);font-size:12px;margin-top:8px">
-    <code>casparcg.config</code> is written to the same folder as the exe each time CasparCG is started.
+    Per-instance <code>casparcg_inst_N.config</code> files are written to the same folder as the exe when CasparCG is started.
   </p>
 </div>
 
-<!-- Import existing casparcg.config -->
-<div class="card" style="margin-bottom:16px">
-  <h2 style="margin-bottom:12px">Import Existing casparcg.config</h2>
-  <p style="color:var(--muted);font-size:13px;margin-bottom:12px">
-    Pull video mode, AMCP port and NDI names from an existing <code>casparcg.config</code>.
-  </p>
-  <div style="display:flex;gap:10px;align-items:flex-end">
-    <div class="form-group" style="flex:1;margin:0">
-      <label>Path to casparcg.config</label>
-      <input type="text" id="import-path" placeholder="C:\\CasparCG\\casparcg.config">
-    </div>
-    <button class="btn btn-warning" onclick="importConfig()" style="flex-shrink:0">Import Config</button>
-  </div>
-  <div id="import-result" style="margin-top:10px;display:none" class="badge badge-success"></div>
-</div>
-
-<!-- Output settings + channel editor -->
+<!-- Output settings + instance editor -->
 <div class="card" id="settings-form">
   <h2 style="margin-bottom:16px">Output Settings</h2>
   <div class="grid-2">
@@ -862,8 +865,8 @@ def page_settings():
       </select>
     </div>
     <div class="form-group">
-      <label>AMCP Port</label>
-      <input type="number" id="amcp_port" value="5250">
+      <label>Base AMCP Port <span style="color:var(--muted);font-size:11px">(instances get base, base+1, base+2…)</span></label>
+      <input type="number" id="amcp_base_port" value="5250" oninput="onBasePortChange()">
     </div>
     <div class="form-group">
       <label>Web UI Port</label>
@@ -882,61 +885,71 @@ def page_settings():
     </div>
   </div>
 
-  <h2 style="margin:20px 0 8px">Channels</h2>
+  <h2 style="margin:20px 0 8px">Instances</h2>
 
   <!-- Column header row -->
   <div style="display:flex;gap:8px;padding:0 12px 6px;color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">
     <span style="width:48px;flex-shrink:0"></span>
-    <span style="width:18px;flex-shrink:0;text-align:center">#</span>
     <span style="width:86px;flex-shrink:0">Type</span>
     <span style="flex:0 0 110px">Name</span>
     <span style="flex:0 0 160px">NDI Name</span>
     <span style="flex:1">URL / Startup Command</span>
+    <span style="width:70px;flex-shrink:0;text-align:right">Port</span>
   </div>
 
-  <div id="channels-tbody"></div>
+  <div id="instances-tbody"></div>
 
   <div style="display:flex;justify-content:space-between;align-items:center;margin-top:20px">
     <div style="display:flex;gap:10px">
-      <button class="btn btn-primary" onclick="saveSettings()">Save & Regenerate Config</button>
+      <button class="btn btn-primary" onclick="saveSettings()">Save & Regenerate Configs</button>
       <button class="btn btn-secondary" onclick="loadSettings()">Reset</button>
     </div>
-    <button class="btn btn-primary btn-sm" onclick="addChannel()">+ Add Channel</button>
+    <button class="btn btn-primary btn-sm" onclick="addInstance()">+ Add Instance</button>
   </div>
   <p style="color:var(--muted);font-size:12px;margin-top:10px">
-    Channel order determines CasparCG channel numbers (top = CH1). Restart CasparCG after saving to apply changes.
+    Each instance is a separate CasparCG process with its own AMCP port. Restart CasparCG after saving to apply changes.
   </p>
 </div>
 """
     js = """
-let currentChannels = [];
+let currentInstances = [];
 
 function loadSettings() {
   api('/api/config').then(cfg => {
     document.getElementById('caspar_exe_path').value = cfg.caspar_exe_path || '';
     document.getElementById('video_mode').value = cfg.video_mode || '1080p2500';
-    document.getElementById('amcp_port').value = cfg.amcp_port || 5250;
+    document.getElementById('amcp_base_port').value = cfg.amcp_base_port || 5250;
     document.getElementById('web_port').value = cfg.web_port || 5280;
     document.getElementById('startup_delay').value = cfg.startup_delay || 8;
     document.getElementById('autostart_caspar').checked = !!cfg.autostart_caspar;
-    currentChannels = (cfg.channels || []).map(ch => ({
-      ...ch,
-      type: ch.type || 'html',
-      startup_command: ch.startup_command || '',
-      url: ch.url || '',
+    currentInstances = (cfg.instances || []).map(inst => ({
+      ...inst,
+      type: inst.type || 'html',
+      startup_command: inst.startup_command || '',
+      url: inst.url || '',
     }));
-    renderChannelTable(currentChannels);
+    renderInstanceTable(currentInstances);
   });
 }
 
-function renderChannelTable(chs) {
-  const last = chs.length - 1;
-  document.getElementById('channels-tbody').innerHTML = chs.map((ch, i) => {
-    const isHtml = (ch.type || 'html') === 'html';
-    const urlVal = (ch.url || '').replace(/"/g, '&quot;');
-    const cmdVal = (ch.startup_command || '').replace(/"/g, '&quot;');
-    const nameVal = (ch.name || '').replace(/"/g, '&quot;');
-    const ndiVal  = (ch.ndi_name || '').replace(/"/g, '&quot;');
+function computedPort(i) {
+  return (parseInt(document.getElementById('amcp_base_port').value) || 5250) + i;
+}
+
+function onBasePortChange() {
+  currentInstances = getFormInstances();
+  renderInstanceTable(currentInstances);
+}
+
+function renderInstanceTable(insts) {
+  const last = insts.length - 1;
+  document.getElementById('instances-tbody').innerHTML = insts.map((inst, i) => {
+    const isHtml = (inst.type || 'html') === 'html';
+    const urlVal = (inst.url || '').replace(/"/g, '&quot;');
+    const cmdVal = (inst.startup_command || '').replace(/"/g, '&quot;');
+    const nameVal = (inst.name || '').replace(/"/g, '&quot;');
+    const ndiVal  = (inst.ndi_name || '').replace(/"/g, '&quot;');
+    const port = computedPort(i);
     return `
     <div class="ch-edit-card">
       <div class="ch-edit-top">
@@ -946,23 +959,23 @@ function renderChannelTable(chs) {
           <button class="btn btn-secondary btn-sm" style="height:22px;padding:0 8px;font-size:11px"
                   ${i===last?'disabled':''} onclick="moveDown(${i})">▼</button>
         </div>
-        <span style="flex-shrink:0;width:18px;text-align:center;color:var(--muted);font-size:12px">${i+1}</span>
-        <select id="ch_type_${i}" onchange="toggleType(${i})" style="flex-shrink:0;width:86px">
+        <select id="inst_type_${i}" onchange="toggleType(${i})" style="flex-shrink:0;width:86px">
           <option value="html" ${isHtml?'selected':''}>HTML5</option>
           <option value="media" ${!isHtml?'selected':''}>Media</option>
         </select>
-        <input type="text" id="ch_name_${i}" value="${nameVal}" placeholder="Name"
+        <input type="text" id="inst_name_${i}" value="${nameVal}" placeholder="Name"
                style="flex:0 0 110px;min-width:0">
-        <input type="text" id="ch_ndi_${i}" value="${ndiVal}" placeholder="NDI Name"
+        <input type="text" id="inst_ndi_${i}" value="${ndiVal}" placeholder="NDI Name"
                style="flex:0 0 160px;min-width:0">
         <button class="btn btn-danger btn-sm" style="flex-shrink:0;padding:0 10px;margin-left:auto"
-                onclick="deleteChannel(${i})" title="Delete channel">×</button>
+                onclick="deleteInstance(${i})" title="Delete instance">×</button>
+        <span style="flex-shrink:0;width:70px;text-align:right;color:var(--muted);font-size:11px">:${port}</span>
       </div>
       <div class="ch-edit-source">
-        <input type="text" id="ch_url_${i}" value="${urlVal}" placeholder="https://..."
+        <input type="text" id="inst_url_${i}" value="${urlVal}" placeholder="https://..."
                style="width:100%;${isHtml?'':'display:none'}">
-        <input type="text" id="ch_cmd_${i}" value="${cmdVal}"
-               placeholder="PLAY ${i+1}-1 CLIP LOOP — leave blank to just CLEAR the channel"
+        <input type="text" id="inst_cmd_${i}" value="${cmdVal}"
+               placeholder='PLAY 1-1 "CLIP" LOOP — leave blank to just CLEAR'
                style="width:100%;${!isHtml?'':'display:none'}">
       </div>
     </div>`;
@@ -970,51 +983,51 @@ function renderChannelTable(chs) {
 }
 
 function toggleType(i) {
-  const isHtml = document.getElementById('ch_type_' + i).value === 'html';
-  document.getElementById('ch_url_' + i).style.display = isHtml ? '' : 'none';
-  document.getElementById('ch_cmd_' + i).style.display = isHtml ? 'none' : '';
+  const isHtml = document.getElementById('inst_type_' + i).value === 'html';
+  document.getElementById('inst_url_' + i).style.display = isHtml ? '' : 'none';
+  document.getElementById('inst_cmd_' + i).style.display = isHtml ? 'none' : '';
 }
 
-function getFormChannels() {
-  return currentChannels.map((ch, i) => ({
-    ...ch,
-    name:            document.getElementById('ch_name_' + i)?.value ?? ch.name,
-    ndi_name:        document.getElementById('ch_ndi_' + i)?.value ?? ch.ndi_name,
-    type:            document.getElementById('ch_type_' + i)?.value ?? ch.type,
-    url:             document.getElementById('ch_url_' + i)?.value ?? ch.url,
-    startup_command: document.getElementById('ch_cmd_' + i)?.value ?? ch.startup_command,
+function getFormInstances() {
+  return currentInstances.map((inst, i) => ({
+    ...inst,
+    name:            document.getElementById('inst_name_' + i)?.value ?? inst.name,
+    ndi_name:        document.getElementById('inst_ndi_' + i)?.value ?? inst.ndi_name,
+    type:            document.getElementById('inst_type_' + i)?.value ?? inst.type,
+    url:             document.getElementById('inst_url_' + i)?.value ?? inst.url,
+    startup_command: document.getElementById('inst_cmd_' + i)?.value ?? inst.startup_command,
   }));
 }
 
 function moveUp(i) {
   if (i === 0) return;
-  currentChannels = getFormChannels();
-  [currentChannels[i-1], currentChannels[i]] = [currentChannels[i], currentChannels[i-1]];
-  renderChannelTable(currentChannels);
+  currentInstances = getFormInstances();
+  [currentInstances[i-1], currentInstances[i]] = [currentInstances[i], currentInstances[i-1]];
+  renderInstanceTable(currentInstances);
 }
 
 function moveDown(i) {
-  if (i >= currentChannels.length - 1) return;
-  currentChannels = getFormChannels();
-  [currentChannels[i], currentChannels[i+1]] = [currentChannels[i+1], currentChannels[i]];
-  renderChannelTable(currentChannels);
+  if (i >= currentInstances.length - 1) return;
+  currentInstances = getFormInstances();
+  [currentInstances[i], currentInstances[i+1]] = [currentInstances[i+1], currentInstances[i]];
+  renderInstanceTable(currentInstances);
 }
 
-function addChannel() {
-  currentChannels = getFormChannels();
-  const n = currentChannels.length + 1;
-  currentChannels.push({ number: n, name: 'CH' + n, ndi_name: 'PCR3 CH' + n,
-                          type: 'html', url: '', startup_command: '' });
-  renderChannelTable(currentChannels);
-  toast('Channel added', 'success');
+function addInstance() {
+  currentInstances = getFormInstances();
+  const n = currentInstances.length + 1;
+  currentInstances.push({ id: n, name: 'INST' + n, ndi_name: 'PCR3 INST' + n,
+                           type: 'html', url: '', startup_command: '' });
+  renderInstanceTable(currentInstances);
+  toast('Instance added', 'success');
 }
 
-function deleteChannel(i) {
-  const name = currentChannels[i]?.name || ('CH' + (i+1));
-  if (!confirm('Delete channel "' + name + '"?')) return;
-  currentChannels = getFormChannels();
-  currentChannels.splice(i, 1);
-  renderChannelTable(currentChannels);
+function deleteInstance(i) {
+  const name = currentInstances[i]?.name || ('Inst ' + (i+1));
+  if (!confirm('Delete instance "' + name + '"?')) return;
+  currentInstances = getFormInstances();
+  currentInstances.splice(i, 1);
+  renderInstanceTable(currentInstances);
   toast(name + ' deleted', 'warning');
 }
 
@@ -1026,32 +1039,19 @@ function saveExePath() {
 }
 
 function saveSettings() {
-  const channels = getFormChannels();
+  const instances = getFormInstances();
   const payload = {
     video_mode:       document.getElementById('video_mode').value,
-    amcp_port:        parseInt(document.getElementById('amcp_port').value),
+    amcp_base_port:   parseInt(document.getElementById('amcp_base_port').value),
     web_port:         parseInt(document.getElementById('web_port').value),
     startup_delay:    parseInt(document.getElementById('startup_delay').value),
     autostart_caspar: document.getElementById('autostart_caspar').checked,
-    channels,
+    instances,
   };
   api('/api/config', 'POST', payload).then(() => {
-    currentChannels = channels;
+    currentInstances = instances;
     toast('Settings saved — restart CasparCG to apply', 'success');
   }).catch(() => toast('Failed to save settings', 'error'));
-}
-
-function importConfig() {
-  const path = document.getElementById('import-path').value.trim();
-  if (!path) { toast('Enter a path to casparcg.config first', 'warning'); return; }
-  toast('Importing...', 'info');
-  api('/api/config/import', 'POST', { path }).then(d => {
-    const res = document.getElementById('import-result');
-    res.textContent = 'Imported — video mode: ' + d.video_mode + ', AMCP port: ' + d.amcp_port;
-    res.style.display = 'inline-block';
-    toast('Config imported', 'success');
-    loadSettings();
-  }).catch(e => toast('Import failed: ' + (e.detail || e), 'error'));
 }
 
 loadSettings();

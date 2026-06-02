@@ -18,7 +18,10 @@ from PIL import Image, ImageDraw, ImageTk
 
 from elliotts_casper_controller import __version__
 from elliotts_casper_controller.amcp_client import AMCPClient
-from elliotts_casper_controller.config_manager import load as load_config, save as save_config
+from elliotts_casper_controller.config_manager import (
+    load as load_config, save as save_config,
+    instance_amcp_port, regenerate_all_instance_configs,
+)
 from elliotts_casper_controller.process_manager import CasparProcessManager
 
 # Set Windows taskbar app ID
@@ -76,6 +79,7 @@ BTN_GRAY  = "#3d3d3d"
 BTN_ORNG  = "#e67e22"
 SUCCESS   = "#22c55e"
 ERROR     = "#ef4444"
+WARNING   = "#f59e0b"
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +130,7 @@ class CasperControllerGUI:
 
         self._cfg = load_config()
         self._web_port = self._cfg.get("web_port", 5280)
-        self._amcp_port = self._cfg.get("amcp_port", 5250)
+        self._amcp_base_port = self._cfg.get("amcp_base_port", 5250)
 
         self._caspar_running = False
         self._web_running = False
@@ -134,7 +138,8 @@ class CasperControllerGUI:
         self._pulse_angle = 0
         self._pulse_image_ref = None
 
-        self._manager: CasparProcessManager | None = None
+        # Multi-instance managers: inst_id -> CasparProcessManager
+        self._managers: dict = {}
         self._server_thread: threading.Thread | None = None
         self._uvicorn_server = None
 
@@ -152,10 +157,7 @@ class CasperControllerGUI:
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Refit height after the first frame so winfo_reqheight is accurate
         self.root.after(100, self._fit_window_height)
-
-        # Auto-start web server
         self.root.after(400, self._start_web_server)
         self.root.after(60_000, self._resync_caspar_runtime)
         self._update_pulse()
@@ -273,11 +275,11 @@ class CasperControllerGUI:
         self._rounded_rect(port_cv, 175, 92, 265, 118, 12, BG_MEDIUM)
         port_cv.create_text(220, 105, text="Change Port", fill=MUTED, font=(self.font_reg[0], 9))
 
-        # AMCP port (right) — also clickable
-        port_cv.create_text(480, 20, text="AMCP PORT", fill=MUTED, font=self.font_bold)
+        # AMCP base port (right)
+        port_cv.create_text(480, 20, text="AMCP BASE PORT", fill=MUTED, font=self.font_bold)
         self._rounded_rect(port_cv, 410, 32, 550, 82, 12, BTN_GRAY)
         self._amcp_text_id = port_cv.create_text(
-            480, 57, text=str(self._amcp_port), fill=TEXT, font=self.font_bold32
+            480, 57, text=str(self._amcp_base_port), fill=TEXT, font=self.font_bold32
         )
         self._rounded_rect(port_cv, 435, 92, 525, 118, 12, BG_MEDIUM)
         port_cv.create_text(480, 105, text="Change Port", fill=MUTED, font=(self.font_reg[0], 9))
@@ -286,7 +288,7 @@ class CasperControllerGUI:
             if 175 <= e.x <= 265 and 92 <= e.y <= 118:
                 self._change_web_port(port_cv)
             elif 435 <= e.x <= 525 and 92 <= e.y <= 118:
-                self._change_amcp_port(port_cv)
+                self._change_amcp_base_port(port_cv)
         port_cv.bind("<Button-1>", _port_card_click)
         port_cv.bind("<Enter>",    lambda e: port_cv.configure(cursor="hand2"))
         port_cv.bind("<Leave>",    lambda e: port_cv.configure(cursor=""))
@@ -367,71 +369,65 @@ class CasperControllerGUI:
         self._btn_update.pack(side=tk.LEFT, padx=6)
         self._make_btn(row4, "Quit", self._on_close, BTN_RED_DK, h=46).pack(side=tk.LEFT, padx=6)
 
-        # -- Channel restarts --
-        ch_outer = tk.Frame(content, bg=BG_DARK)
-        ch_outer.pack(fill=tk.X, pady=(4, 0))
-        tk.Label(ch_outer, text="CHANNEL RESTARTS", font=self.font_bold,
+        # -- Instance restarts --
+        inst_outer = tk.Frame(content, bg=BG_DARK)
+        inst_outer.pack(fill=tk.X, pady=(4, 0))
+        tk.Label(inst_outer, text="INSTANCE RESTARTS", font=self.font_bold,
                  bg=BG_DARK, fg=MUTED).pack(anchor="w", pady=(0, 6))
-        self._ch_btn_container = tk.Frame(ch_outer, bg=BG_DARK)
-        self._ch_btn_container.pack(fill=tk.X)
-        self._last_channel_sig = ""
-        self._rebuild_channel_buttons()
+        self._inst_btn_container = tk.Frame(inst_outer, bg=BG_DARK)
+        self._inst_btn_container.pack(fill=tk.X)
+        self._last_instance_sig = ""
+        self._rebuild_instance_buttons()
         self._poll_config_for_changes()
 
     # -----------------------------------------------------------------------
-    # Dynamic channel buttons
+    # Dynamic instance buttons
     # -----------------------------------------------------------------------
 
-    def _channel_sig(self, cfg: dict) -> str:
-        """A string that changes whenever channel names/count changes."""
-        return ",".join(f"{ch['number']}:{ch['name']}" for ch in cfg.get("channels", []))
+    def _instance_sig(self, cfg: dict) -> str:
+        return ",".join(f"{inst['id']}:{inst['name']}" for inst in cfg.get("instances", []))
 
-    def _rebuild_channel_buttons(self):
-        """Clear and recreate the channel restart buttons from current config."""
-        for widget in self._ch_btn_container.winfo_children():
+    def _rebuild_instance_buttons(self):
+        for widget in self._inst_btn_container.winfo_children():
             widget.destroy()
 
         cfg = load_config()
-        channels = cfg.get("channels", [])
+        instances = cfg.get("instances", [])
 
-        # Buttons: fixed width, wrap into rows of max 6
         btn_w, btn_h, btn_gap = 95, 36, 6
         max_per_row = 6
         row = None
 
-        for i, ch in enumerate(channels):
+        for i, inst in enumerate(instances):
             if i % max_per_row == 0:
-                row = tk.Frame(self._ch_btn_container, bg=BG_DARK)
+                row = tk.Frame(self._inst_btn_container, bg=BG_DARK)
                 row.pack(fill=tk.X, pady=(0, btn_gap))
             self._make_btn(
                 row,
-                f"↺  {ch['name']}",
-                lambda n=ch["number"], name=ch["name"]: self._restart_ch(n, name),
+                f"↺  {inst['name']}",
+                lambda iid=inst["id"], name=inst["name"]: self._restart_inst(iid, name),
                 BTN_GRAY, w=btn_w, h=btn_h,
             ).pack(side=tk.LEFT, padx=(0, btn_gap))
 
-        # "All" button — start a new row if the last row is already full
-        if row is None or len(channels) % max_per_row == 0:
-            row = tk.Frame(self._ch_btn_container, bg=BG_DARK)
+        if row is None or len(instances) % max_per_row == 0:
+            row = tk.Frame(self._inst_btn_container, bg=BG_DARK)
             row.pack(fill=tk.X, pady=(0, btn_gap))
         self._make_btn(row, "↺  All", self._restart_all,
                        BTN_ORNG, w=80, h=btn_h).pack(side=tk.LEFT, padx=(0, btn_gap))
 
-        self._last_channel_sig = self._channel_sig(cfg)
+        self._last_instance_sig = self._instance_sig(cfg)
         self.root.after(50, self._fit_window_height)
 
     def _fit_window_height(self):
-        """Resize the window height to exactly fit its packed content."""
         self.root.update_idletasks()
         self.root.geometry(f"750x{self.root.winfo_reqheight()}")
 
     def _poll_config_for_changes(self):
-        """Every 5s check if channels have changed and rebuild buttons if so."""
         try:
             cfg = load_config()
-            sig = self._channel_sig(cfg)
-            if sig != self._last_channel_sig:
-                self._rebuild_channel_buttons()
+            sig = self._instance_sig(cfg)
+            if sig != self._last_instance_sig:
+                self._rebuild_instance_buttons()
         except Exception:
             pass
         self.root.after(5000, self._poll_config_for_changes)
@@ -457,20 +453,21 @@ class CasperControllerGUI:
                                 f"Web UI port changed to {new_port}.\nRestart the app for the new port to take effect.",
                                 parent=self.root)
 
-    def _change_amcp_port(self, port_cv):
+    def _change_amcp_base_port(self, port_cv):
         new_port = simpledialog.askinteger(
-            "Change AMCP Port", "Enter CasparCG AMCP port:",
-            initialvalue=self._amcp_port, minvalue=1024, maxvalue=65535,
+            "Change AMCP Base Port",
+            "Enter the base AMCP port.\nInstances will use base, base+1, base+2…",
+            initialvalue=self._amcp_base_port, minvalue=1024, maxvalue=65535,
             parent=self.root,
         )
-        if new_port and new_port != self._amcp_port:
-            self._amcp_port = new_port
+        if new_port and new_port != self._amcp_base_port:
+            self._amcp_base_port = new_port
             cfg = load_config()
-            cfg["amcp_port"] = new_port
+            cfg["amcp_base_port"] = new_port
             save_config(cfg)
             port_cv.itemconfig(self._amcp_text_id, text=str(new_port))
-            messagebox.showinfo("AMCP Port Changed",
-                                f"AMCP port changed to {new_port}.\nRestart CasparCG for changes to take effect.",
+            messagebox.showinfo("AMCP Base Port Changed",
+                                f"Base AMCP port changed to {new_port}.\nRestart CasparCG for changes to take effect.",
                                 parent=self.root)
 
     def _copy_url(self):
@@ -559,16 +556,17 @@ class CasperControllerGUI:
         self.root.after(1000, self._update_runtime)
 
     def _resync_caspar_runtime(self):
-        """Every 60 s — verify CasparCG is still running via AMCP and reset timer if it restarted."""
+        """Every 60 s — verify at least one instance is still running."""
         def check():
             try:
                 cfg = load_config()
-                alive = AMCPClient(port=cfg["amcp_port"]).ping()
+                alive = any(
+                    AMCPClient(port=instance_amcp_port(cfg, inst)).ping()
+                    for inst in cfg.get("instances", [])
+                )
                 if not alive and self._caspar_running:
-                    # Detected stop that poll hadn't caught yet
                     self.root.after(0, self._on_caspar_stopped)
                 elif alive and not self._caspar_start_time:
-                    # Running but no start time — set it now
                     self._caspar_start_time = time.time()
             except Exception:
                 pass
@@ -587,8 +585,6 @@ class CasperControllerGUI:
             _kill_port(self._web_port)
             time.sleep(0.4)
 
-        # Suppress uvicorn's StreamHandlers — in a windowed exe sys.stderr may
-        # be None and any write to it kills the server thread silently.
         import logging
         for _log_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
             _lg = logging.getLogger(_log_name)
@@ -608,7 +604,6 @@ class CasperControllerGUI:
                 self._server_error = str(exc)
                 import traceback
                 tb = traceback.format_exc()
-                # Write to a log file next to exe so we can read it even without a console
                 try:
                     from elliotts_casper_controller.config_manager import _config_dir
                     log_path = os.path.join(_config_dir(), "webserver_error.log")
@@ -619,18 +614,14 @@ class CasperControllerGUI:
 
         self._server_thread = threading.Thread(target=run, daemon=True)
         self._server_thread.start()
-
-        # Poll until the port is actually listening (max 12 s)
         self.root.after(500, self._check_web_server_up, 0)
 
     def _check_web_server_up(self, attempt: int):
-        """Poll until the web server is listening, then update UI. Max 24 attempts × 500 ms = 12 s."""
         if _is_port_in_use(self._web_port):
             self._web_running = True
             self._start_time = time.time()
             self._status_label.config(text=f"Web server running on port {self._web_port}", fg=ACCENT)
             self._enable_btn(self._btn_web, self._open_browser, "Open Web UI", BTN_BLUE)
-            # Auto-start CasparCG if configured
             cfg = load_config()
             if cfg.get("autostart_caspar"):
                 self.root.after(800, self._auto_start_caspar)
@@ -662,7 +653,7 @@ class CasperControllerGUI:
         webbrowser.open(f"http://127.0.0.1:{self._web_port}")
 
     # -----------------------------------------------------------------------
-    # CasparCG process
+    # CasparCG process management
     # -----------------------------------------------------------------------
 
     def _check_updates(self):
@@ -701,7 +692,6 @@ class CasperControllerGUI:
             self._btn_update, self._check_updates, "Check for Updates", ACCENT))
 
     def _auto_start_caspar(self):
-        """Called on startup when autostart_caspar is enabled in config."""
         self._status_label.config(text="Auto-starting CasparCG...", fg=MUTED)
         self._disable_btn(self._btn_start, "Auto-Starting...")
         self._start_caspar(_auto=True)
@@ -722,44 +712,82 @@ class CasperControllerGUI:
             return
         if not _auto:
             self._disable_btn(self._btn_start, "Starting...")
-        self._status_label.config(text="Starting CasparCG...", fg=MUTED)
+        self._status_label.config(text="Starting CasparCG instances...", fg=MUTED)
 
         def run():
             try:
                 cfg = load_config()
-                self._manager = CasparProcessManager(
-                    exe_path=exe,
-                    amcp_port=cfg["amcp_port"],
-                    startup_delay=cfg["startup_delay"],
-                    window_title="PCR3 CasparCG — NDI Server",
+                instances = cfg.get("instances", [])
+                regenerate_all_instance_configs(cfg)
+
+                # Kill any existing CasparCG processes before launching fresh
+                any_responding = any(
+                    AMCPClient(port=instance_amcp_port(cfg, inst)).ping()
+                    for inst in instances
                 )
-                ok = self._manager.start(config=cfg)  # writes casparcg.config to exe dir first
-                if ok:
-                    client = AMCPClient(port=cfg["amcp_port"])
-                    for ch in cfg["channels"]:
-                        res = self._send_channel_load(ch, client)
-                        self._log_to_console(f"CH{ch['number']} ({ch['name']}) -> {res[:60]}")
-                    self.root.after(0, self._on_caspar_started)
+                if any_responding:
+                    CasparProcessManager._kill_all_caspar_instances()
+                    time.sleep(1.5)
+
+                self._managers = {}
+                started = []
+                errors = []
+                lock = threading.Lock()
+
+                def start_one(inst):
+                    port = instance_amcp_port(cfg, inst)
+                    m = CasparProcessManager(
+                        exe_path=exe,
+                        amcp_port=port,
+                        startup_delay=cfg["startup_delay"],
+                        window_title=f"PCR3 CasparCG — {inst['name']}",
+                        config_filename=f"casparcg_inst_{inst['id']}.config",
+                    )
+                    with lock:
+                        self._managers[inst["id"]] = m
+                    ok = m.start()
+                    if ok:
+                        res = self._send_instance_load(inst, AMCPClient(port=port))
+                        self._log_to_console(f"Inst {inst['id']} ({inst['name']}) → {res[:60]}")
+                        with lock:
+                            started.append(inst["id"])
+                    else:
+                        self._log_to_console(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
+                        with lock:
+                            errors.append(inst["id"])
+
+                threads = [threading.Thread(target=start_one, args=(inst,), daemon=True)
+                           for inst in instances]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+                if started:
+                    self.root.after(0, lambda s=len(started), total=len(instances):
+                                    self._on_caspar_started(s, total))
                 else:
-                    self._manager = None
+                    self._managers = {}
                     self.root.after(0, lambda: self._on_caspar_failed(
-                        "CasparCG started but AMCP did not respond.\nCheck that the config is correct and NDI is installed."
+                        "No CasparCG instances started successfully.\n"
+                        "Check the exe path and that AMCP ports are free."
                     ))
             except Exception as exc:
-                self._manager = None
+                self._managers = {}
                 self.root.after(0, lambda: self._on_caspar_failed(str(exc)))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _on_caspar_started(self):
+    def _on_caspar_started(self, started: int, total: int):
         self._caspar_running = True
         self._caspar_start_time = time.time()
         self._caspar_console_visible = False
-        self._status_label.config(text="CasparCG running — all channels loaded", fg=SUCCESS)
+        msg = f"CasparCG running — {started}/{total} instances loaded"
+        self._status_label.config(text=msg, fg=SUCCESS)
         self._enable_btn(self._btn_start, self._start_caspar, "Start CasparCG", BTN_GREEN)
-        self._enable_btn(self._btn_stop, self._stop_caspar,  "Stop CasparCG",  BTN_RED)
+        self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
         self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console, "CasparCG Console", BTN_CASPAR)
-        self._log_to_console("CasparCG started and all channels loaded.")
+        self._log_to_console(msg)
 
     def _on_caspar_failed(self, reason: str):
         self._status_label.config(text="CasparCG failed to start", fg=ERROR)
@@ -769,14 +797,9 @@ class CasperControllerGUI:
 
     def _stop_caspar(self):
         def run():
-            if self._manager:
-                # Stop only our specific process — does not affect other CasparCG instances
-                self._manager.stop()
-                self._manager = None
-            else:
-                # Fallback: send BYE via AMCP only (no process kill)
-                cfg = load_config()
-                AMCPClient(port=cfg["amcp_port"]).send("BYE")
+            for m in list(self._managers.values()):
+                m.stop()
+            self._managers = {}
             self.root.after(0, self._on_caspar_stopped)
 
         self._disable_btn(self._btn_stop, "Stopping...")
@@ -791,43 +814,65 @@ class CasperControllerGUI:
         self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
         self._log_to_console("CasparCG stopped.")
 
-    def _try_adopt_caspar(self):
-        """Attempt to adopt an already-running CasparCG process."""
+    def _try_adopt_instances(self):
+        """Attempt to adopt any running CasparCG instances that we don't manage yet."""
         try:
             cfg = load_config()
-            self._manager = CasparProcessManager(
-                exe_path=cfg.get("caspar_exe_path", "casparcg.exe"),
-                amcp_port=cfg["amcp_port"],
-                startup_delay=cfg["startup_delay"],
-                window_title="PCR3 CasparCG — NDI Server",
-            )
-            if self._manager.adopt_existing():
+            adopted = 0
+            for inst in cfg.get("instances", []):
+                if inst["id"] in self._managers:
+                    continue
+                port = instance_amcp_port(cfg, inst)
+                if not AMCPClient(port=port).ping():
+                    continue
+                m = CasparProcessManager(
+                    exe_path=cfg.get("caspar_exe_path", "casparcg.exe"),
+                    amcp_port=port,
+                    startup_delay=cfg["startup_delay"],
+                    window_title=f"PCR3 CasparCG — {inst['name']}",
+                    config_filename=f"casparcg_inst_{inst['id']}.config",
+                )
+                if m.adopt_existing():
+                    self._managers[inst["id"]] = m
+                    adopted += 1
+            if adopted > 0:
                 self._caspar_running = True
-                self._caspar_start_time = time.time()
-                self._caspar_console_visible = False
-                self._status_label.config(text="CasparCG running (reconnected)", fg=SUCCESS)
+                if not self._caspar_start_time:
+                    self._caspar_start_time = time.time()
+                self._status_label.config(
+                    text=f"CasparCG running (reconnected {adopted} instance(s))", fg=SUCCESS)
                 self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
-                self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console, "CasparCG Console", BTN_CASPAR)
-                self._log_to_console("Reconnected to existing CasparCG instance.")
-            else:
-                self._manager = None
+                self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console,
+                                 "CasparCG Console", BTN_CASPAR)
+                self._log_to_console(f"Reconnected to {adopted} CasparCG instance(s).")
         except Exception:
-            self._manager = None
+            pass
 
     def _poll_caspar_status(self):
         def check():
             try:
                 cfg = load_config()
-                client = AMCPClient(port=cfg["amcp_port"])
-                running = client.ping()
-                if running and not self._manager:
-                    # CasparCG is up but we have no handle — try to adopt it
-                    self.root.after(0, self._try_adopt_caspar)
-                elif running != self._caspar_running:
-                    self._caspar_running = running
-                    if running:
-                        self.root.after(0, lambda: self._status_label.config(
-                            text="CasparCG running", fg=SUCCESS))
+                instances = cfg.get("instances", [])
+                instance_states = {
+                    inst["id"]: AMCPClient(port=instance_amcp_port(cfg, inst)).ping()
+                    for inst in instances
+                }
+                running_count = sum(instance_states.values())
+                overall = running_count > 0
+
+                # Adopt any unmanaged running instances
+                managed_ids = set(self._managers.keys())
+                has_unmanaged = any(v and k not in managed_ids for k, v in instance_states.items())
+                if has_unmanaged:
+                    self.root.after(0, self._try_adopt_instances)
+
+                if overall != self._caspar_running:
+                    self._caspar_running = overall
+                    if overall:
+                        total = len(instances)
+                        self.root.after(0, lambda rc=running_count, tot=total:
+                                        self._status_label.config(
+                                            text=f"CasparCG running — {rc}/{tot} instances", fg=SUCCESS))
                     else:
                         self.root.after(0, self._on_caspar_stopped)
             except Exception:
@@ -837,42 +882,41 @@ class CasperControllerGUI:
         threading.Thread(target=check, daemon=True).start()
 
     # -----------------------------------------------------------------------
-    # Channel restart
+    # Instance restart
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def _send_channel_load(ch: dict, client: AMCPClient) -> str:
-        n = ch["number"]
-        if ch.get("type", "html") == "html":
-            return client.play_html(n, ch.get("url", ""))
-        cmd = ch.get("startup_command", "").strip()
-        return client.send(cmd) if cmd else client.send(f"CLEAR {n}")
+    def _send_instance_load(inst: dict, client: AMCPClient) -> str:
+        if inst.get("type", "html") == "html":
+            return client.play_html(1, inst.get("url", ""))
+        cmd = inst.get("startup_command", "").strip()
+        return client.send(cmd) if cmd else client.send("CLEAR 1")
 
-    def _restart_ch(self, number: int, name: str):
+    def _restart_inst(self, inst_id: int, name: str):
         def run():
             cfg = load_config()
-            channels = {ch["number"]: ch for ch in cfg["channels"]}
-            ch = channels.get(number)
-            if not ch:
+            inst_map = {i["id"]: i for i in cfg.get("instances", [])}
+            inst = inst_map.get(inst_id)
+            if not inst:
                 return
-            client = AMCPClient(port=cfg["amcp_port"])
-            client.stop_channel(number)
+            port = instance_amcp_port(cfg, inst)
+            client = AMCPClient(port=port)
+            client.stop_channel(1)
             time.sleep(0.5)
-            res = self._send_channel_load(ch, client)
-            self._log_to_console(f"CH{number} ({name}) restarted -> {res[:60]}")
-
+            res = self._send_instance_load(inst, client)
+            self._log_to_console(f"Inst {inst_id} ({name}) restarted → {res[:60]}")
         threading.Thread(target=run, daemon=True).start()
 
     def _restart_all(self):
         def run():
             cfg = load_config()
-            client = AMCPClient(port=cfg["amcp_port"])
-            for ch in cfg["channels"]:
-                client.stop_channel(ch["number"])
+            for inst in cfg.get("instances", []):
+                port = instance_amcp_port(cfg, inst)
+                client = AMCPClient(port=port)
+                client.stop_channel(1)
                 time.sleep(0.3)
-                res = self._send_channel_load(ch, client)
-                self._log_to_console(f"CH{ch['number']} restarted -> {res[:60]}")
-
+                res = self._send_instance_load(inst, client)
+                self._log_to_console(f"Inst {inst['id']} restarted → {res[:60]}")
         threading.Thread(target=run, daemon=True).start()
 
     # -----------------------------------------------------------------------
@@ -889,7 +933,6 @@ class CasperControllerGUI:
                 pass
 
     def _toggle_console(self):
-        """Open/close the app log window (Python stdout/stderr/logging)."""
         try:
             alive = self._console_window and self._console_window.winfo_exists()
         except Exception:
@@ -948,16 +991,17 @@ class CasperControllerGUI:
         self._btn_console.bind("<Button-1>", lambda e: self._toggle_console())
 
     def _toggle_caspar_console(self):
-        """Show/hide the native CasparCG cmd window."""
-        if not self._manager:
+        """Show/hide the native CasparCG cmd window for the first managed instance."""
+        m = next(iter(self._managers.values()), None) if self._managers else None
+        if not m:
             return
         if self._caspar_console_visible:
-            self._manager.hide_console()
+            m.hide_console()
             self._caspar_console_visible = False
             self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console,
                              "CasparCG Console", BTN_CASPAR)
         else:
-            ok = self._manager.show_console()
+            ok = m.show_console()
             if ok:
                 self._caspar_console_visible = True
                 self._enable_btn(self._btn_caspar_console, self._toggle_caspar_console,
@@ -986,11 +1030,11 @@ class CasperControllerGUI:
         self.root.withdraw()
         if not self._tray_icon:
             menu = pystray.Menu(
-                pystray.MenuItem("Show Window",        lambda: self._show_from_tray()),
-                pystray.MenuItem("Open Web UI",        lambda: self._open_browser()),
-                pystray.MenuItem("Restart All Channels", lambda: self._restart_all()),
+                pystray.MenuItem("Show Window",          lambda: self._show_from_tray()),
+                pystray.MenuItem("Open Web UI",          lambda: self._open_browser()),
+                pystray.MenuItem("Restart All Instances", lambda: self._restart_all()),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Quit",               lambda: self._quit()),
+                pystray.MenuItem("Quit",                 lambda: self._quit()),
             )
             self._tray_icon = pystray.Icon(
                 "ElliotsCasperController",

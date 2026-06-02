@@ -37,28 +37,25 @@ class _AdoptedProcess:
 
 class CasparProcessManager:
     def __init__(self, exe_path: str, amcp_port: int = 5250, startup_delay: int = 8,
-                 window_title: str = "PCR3 CasparCG - NDI Server"):
+                 window_title: str = "PCR3 CasparCG - NDI Server",
+                 config_filename: str = "casparcg.config"):
         self.exe_path = exe_path
         self.amcp_port = amcp_port
         self.startup_delay = startup_delay
         self.window_title = window_title
+        self.config_filename = config_filename
         self._process: Optional[subprocess.Popen] = None
         self._client = AMCPClient(port=amcp_port)
         self._console_hwnd = None  # conhost HWND, found after startup
 
-    def start(self, config: dict | None = None) -> bool:
+    def start(self) -> bool:
+        """Launch CasparCG using self.config_filename. Caller must pre-write the config."""
         if self.is_running():
             return True
-        # Kill any orphaned CasparCG instances before launching a fresh one
-        if self._client.ping():
-            self._kill_all_caspar_instances()
-        if config:
-            from elliotts_casper_controller.config_manager import regenerate_caspar_config
-            regenerate_caspar_config(config)
         try:
             exe_name = os.path.basename(self.exe_path)
             safe_title = self.window_title.replace('"', "'").replace('&', 'and')
-            cmd = f'cmd /k "color {_CONSOLE_COLOR} && title {safe_title} && {exe_name}"'
+            cmd = f'cmd /k "color {_CONSOLE_COLOR} && title {safe_title} && {exe_name} {self.config_filename}"'
 
             # Launch hidden — the console window is shown only on demand via show_console().
             si = subprocess.STARTUPINFO()
