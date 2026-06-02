@@ -108,8 +108,6 @@ class CasperControllerGUI:
         self._uvicorn_server = None
 
         self._tray_icon: pystray.Icon | None = None
-        self._caspar_start_time: float | None = None
-        self._caspar_runtime_label = None
 
         self._load_fonts()
         self._set_window_icon()
@@ -118,7 +116,6 @@ class CasperControllerGUI:
 
         self.root.after(100, self._fit_window_height)
         self.root.after(400, self._start_web_server)
-        self.root.after(60_000, self._resync_caspar_runtime)
         self._update_pulse()
         self._update_runtime()
         self._poll_caspar_status()
@@ -272,7 +269,7 @@ class CasperControllerGUI:
                                        font=self.font_reg11, bg=BG_DARK, fg=MUTED)
         self._status_label.pack(side=tk.LEFT)
 
-        # -- Dual runtime row --
+        # -- Controller uptime row --
         runtime_f = tk.Frame(content, bg=BG_DARK)
         runtime_f.pack(pady=(0, 6))
         tk.Label(runtime_f, text="Controller:", font=self.font_reg,
@@ -280,11 +277,6 @@ class CasperControllerGUI:
         self._runtime_label = tk.Label(runtime_f, text="—", font=self.font_reg,
                                         bg=BG_DARK, fg=MUTED)
         self._runtime_label.pack(side=tk.LEFT, padx=(4, 0))
-        tk.Label(runtime_f, text="   |   CasparCG:", font=self.font_reg,
-                 bg=BG_DARK, fg=MUTED).pack(side=tk.LEFT, padx=(12, 0))
-        self._caspar_runtime_label = tk.Label(runtime_f, text="Stopped", font=self.font_reg,
-                                               bg=BG_DARK, fg=MUTED)
-        self._caspar_runtime_label.pack(side=tk.LEFT, padx=(4, 0))
 
         # -- Action buttons --
         btn_area = tk.Frame(content, bg=BG_DARK)
@@ -301,71 +293,17 @@ class CasperControllerGUI:
         row2.pack(pady=4)
         self._btn_web = self._make_btn(row2, "Open Web UI", self._open_browser, BTN_BLUE, h=46, state=tk.DISABLED)
         self._btn_web.pack(side=tk.LEFT, padx=6)
-        self._make_btn(row2, "Hide to Tray", self._hide_to_tray, BTN_GRAY, h=46).pack(side=tk.LEFT, padx=6)
+        self._btn_update = self._make_btn(row2, "Check for Updates", self._check_updates, ACCENT, h=46)
+        self._btn_update.pack(side=tk.LEFT, padx=6)
 
         row3 = tk.Frame(btn_area, bg=BG_DARK)
         row3.pack(pady=4)
-        self._btn_update = self._make_btn(row3, "Check for Updates", self._check_updates, ACCENT, h=46)
-        self._btn_update.pack(side=tk.LEFT, padx=6)
+        self._make_btn(row3, "Hide to Tray", self._hide_to_tray, BTN_GRAY, h=46).pack(side=tk.LEFT, padx=6)
         self._make_btn(row3, "Quit", self._on_close, BTN_RED_DK, h=46).pack(side=tk.LEFT, padx=6)
-
-        # -- Instance restarts --
-        inst_outer = tk.Frame(content, bg=BG_DARK)
-        inst_outer.pack(fill=tk.X, pady=(4, 0))
-        tk.Label(inst_outer, text="INSTANCE RESTARTS", font=self.font_bold,
-                 bg=BG_DARK, fg=MUTED).pack(anchor="w", pady=(0, 6))
-        self._inst_btn_container = tk.Frame(inst_outer, bg=BG_DARK)
-        self._inst_btn_container.pack(fill=tk.X)
-        self._last_instance_sig = ""
-        self._rebuild_instance_buttons()
-        self._poll_config_for_changes()
-
-    # -----------------------------------------------------------------------
-    # Dynamic instance buttons
-    # -----------------------------------------------------------------------
-
-    def _instance_sig(self, cfg: dict) -> str:
-        return ",".join(f"{inst['id']}:{inst['name']}" for inst in cfg.get("instances", []))
-
-    def _rebuild_instance_buttons(self):
-        for widget in self._inst_btn_container.winfo_children():
-            widget.destroy()
-
-        cfg = load_config()
-        instances = cfg.get("instances", [])
-
-        btn_w, btn_h, btn_gap = 95, 36, 6
-        max_per_row = 6
-        row = None
-
-        for i, inst in enumerate(instances):
-            if i % max_per_row == 0:
-                row = tk.Frame(self._inst_btn_container, bg=BG_DARK)
-                row.pack(fill=tk.X, pady=(0, btn_gap))
-            self._make_btn(
-                row,
-                f"↺  {inst['name']}",
-                lambda iid=inst["id"], name=inst["name"]: self._restart_inst(iid, name),
-                BTN_GRAY, w=btn_w, h=btn_h,
-            ).pack(side=tk.LEFT, padx=(0, btn_gap))
-
-
-        self._last_instance_sig = self._instance_sig(cfg)
-        self.root.after(50, self._fit_window_height)
 
     def _fit_window_height(self):
         self.root.update_idletasks()
         self.root.geometry(f"750x{self.root.winfo_reqheight()}")
-
-    def _poll_config_for_changes(self):
-        try:
-            cfg = load_config()
-            sig = self._instance_sig(cfg)
-            if sig != self._last_instance_sig:
-                self._rebuild_instance_buttons()
-        except Exception:
-            pass
-        self.root.after(5000, self._poll_config_for_changes)
 
     # -----------------------------------------------------------------------
     # Port card
@@ -465,32 +403,7 @@ class CasperControllerGUI:
             self._runtime_label.config(text=self._fmt_elapsed(elapsed), fg=ACCENT)
         else:
             self._runtime_label.config(text="—", fg=MUTED)
-
-        if self._caspar_running and self._caspar_start_time:
-            elapsed = int(time.time() - self._caspar_start_time)
-            self._caspar_runtime_label.config(text=self._fmt_elapsed(elapsed), fg=SUCCESS)
-        else:
-            self._caspar_runtime_label.config(text="Stopped", fg=MUTED)
-
         self.root.after(1000, self._update_runtime)
-
-    def _resync_caspar_runtime(self):
-        """Every 60 s — verify at least one instance is still running."""
-        def check():
-            try:
-                cfg = load_config()
-                alive = any(
-                    AMCPClient(port=instance_amcp_port(cfg, inst)).ping()
-                    for inst in cfg.get("instances", [])
-                )
-                if not alive and self._caspar_running:
-                    self.root.after(0, self._on_caspar_stopped)
-                elif alive and not self._caspar_start_time:
-                    self._caspar_start_time = time.time()
-            except Exception:
-                pass
-        threading.Thread(target=check, daemon=True).start()
-        self.root.after(60_000, self._resync_caspar_runtime)
 
     # -----------------------------------------------------------------------
     # Web server
@@ -688,7 +601,6 @@ class CasperControllerGUI:
 
     def _on_caspar_started(self, started: int, total: int):
         self._caspar_running = True
-        self._caspar_start_time = time.time()
         msg = f"CasparCG running — {started}/{total} instances loaded"
         self._status_label.config(text=msg, fg=SUCCESS)
         self._enable_btn(self._btn_start, self._start_caspar, "Start CasparCG", BTN_GREEN)
@@ -720,7 +632,6 @@ class CasperControllerGUI:
 
     def _on_caspar_stopped(self):
         self._caspar_running = False
-        self._caspar_start_time = None
         self._status_label.config(text="CasparCG stopped", fg=MUTED)
         self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)
         logger.info("CasparCG stopped.")
@@ -748,8 +659,6 @@ class CasperControllerGUI:
                     adopted += 1
             if adopted > 0:
                 self._caspar_running = True
-                if not self._caspar_start_time:
-                    self._caspar_start_time = time.time()
                 self._status_label.config(
                     text=f"CasparCG running (reconnected {adopted} instance(s))", fg=SUCCESS)
                 self._enable_btn(self._btn_stop, self._stop_caspar, "Stop CasparCG", BTN_RED)

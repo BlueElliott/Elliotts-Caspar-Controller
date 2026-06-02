@@ -450,14 +450,25 @@ def _restart_instance_bg(inst_id: int):
     inst = inst_map.get(inst_id)
     if not inst:
         return
+    port = instance_amcp_port(cfg, inst)
     if inst_id in _managers:
         _managers[inst_id].stop()
+        _managers.pop(inst_id, None)
+    else:
+        # No manager (e.g. started from GUI) — send BYE and wait for port to close
+        client = AMCPClient(port=port)
+        if client.ping():
+            client.send("BYE")
+            for _ in range(10):
+                time.sleep(0.5)
+                if not AMCPClient(port=port).ping():
+                    break
     regenerate_instance_config(cfg, inst)
     m = _make_manager(inst, cfg)
     _managers[inst_id] = m
     ok = m.start()
     if ok:
-        res = _load_instance(inst, AMCPClient(port=instance_amcp_port(cfg, inst)))
+        res = _load_instance(inst, AMCPClient(port=port))
         _log_event(f"Inst {inst_id} ({inst['name']}) restarted → {res[:60]}")
     else:
         _log_event(f"Inst {inst_id} ({inst['name']}) failed to restart")
@@ -478,16 +489,63 @@ def api_instance_restart(inst_id: int):
 
 @app.post("/api/instance/all/restart")
 def api_instance_restart_all():
+    global _managers
     cfg = load_config()
     instances = cfg.get("instances", [])
 
     def _do_all():
-        for inst in instances:
-            _restart_instance_bg(inst["id"])
+        global _managers
+        # Stop all managed instances in parallel
+        threads = [threading.Thread(target=m.stop, daemon=True) for m in list(_managers.values())]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=3)
+        # Kill any remaining (e.g. started from GUI)
+        CasparProcessManager._kill_all_caspar_instances()
+        _managers = {}
+        regenerate_all_instance_configs(cfg)
+        # Start sequentially with 5s gap for NDI ordering
+        for i, inst in enumerate(instances):
+            m = _make_manager(inst, cfg)
+            _managers[inst["id"]] = m
+            ok = m.start()
+            if ok:
+                res = _load_instance(inst, AMCPClient(port=instance_amcp_port(cfg, inst)))
+                _log_event(f"Inst {inst['id']} ({inst['name']}) restarted → {res[:60]}")
+                if i < len(instances) - 1:
+                    time.sleep(5)
+            else:
+                _log_event(f"Inst {inst['id']} ({inst['name']}) failed to restart")
+                _managers.pop(inst["id"], None)
 
     _log_event("Restarting all instances...")
     threading.Thread(target=_do_all, daemon=True).start()
     return {"ok": True, "message": "Restarting all instances..."}
+
+
+@app.post("/api/instance/{inst_id}/stop")
+def api_instance_stop(inst_id: int):
+    global _managers
+    cfg = load_config()
+    inst_map = {i["id"]: i for i in cfg.get("instances", [])}
+    if inst_id not in inst_map:
+        raise HTTPException(status_code=404, detail=f"Instance {inst_id} not found")
+    inst = inst_map[inst_id]
+    port = instance_amcp_port(cfg, inst)
+
+    def _do_stop():
+        if inst_id in _managers:
+            _managers[inst_id].stop()
+            _managers.pop(inst_id, None)
+        else:
+            client = AMCPClient(port=port)
+            if client.ping():
+                client.send("BYE")
+        _log_event(f"Inst {inst_id} ({inst['name']}) stopped.")
+
+    threading.Thread(target=_do_stop, daemon=True).start()
+    return {"ok": True, "message": f"Stopping {inst['name']}..."}
 
 
 class AMCPCommandRequest(BaseModel):
@@ -729,8 +787,11 @@ function renderInstances(instances) {
       ${sourceInfo}
       <span class="badge ${inst.status === 'live' ? 'badge-success' : 'badge-error'}">${inst.status}</span>
       ${inst.status === 'live'
-        ? `<button class="btn btn-warning btn-sm" onclick="restartInstance(${inst.id}, '${inst.name}')">↺ Restart</button>`
-        : `<button class="btn btn-success btn-sm" onclick="restartInstance(${inst.id}, '${inst.name}')">▶ Start</button>`
+        ? `<div style="display:flex;gap:6px">
+             <button class="btn btn-warning btn-sm" style="flex:1" onclick="restartInstance(${inst.id}, '${inst.name}')">↺ Restart</button>
+             <button class="btn btn-danger btn-sm" style="flex:1" onclick="stopInstance(${inst.id}, '${inst.name}')">■ Stop</button>
+           </div>`
+        : `<button class="btn btn-success btn-sm" style="width:100%" onclick="restartInstance(${inst.id}, '${inst.name}')">▶ Start</button>`
       }
       ${amcpRow}
     </div>`;
@@ -818,6 +879,14 @@ function restartAll() {
   }).catch(() => toast('Failed', 'error'));
 }
 
+function stopInstance(id, name) {
+  toast('Stopping ' + name + '...', 'warning');
+  api('/api/instance/' + id + '/stop', 'POST').then(() => {
+    toast(name + ' stopped', 'success');
+    updateStatus();
+  }).catch(() => toast('Failed to stop ' + name, 'error'));
+}
+
 function sendAmcp(id) {
   const input = document.getElementById('amcp_' + id);
   const cmd = input.value.trim();
@@ -893,16 +962,14 @@ def page_settings():
     <span style="flex:0 0 110px">Name</span>
     <span style="flex:0 0 160px">NDI Name</span>
     <span style="flex:1">URL / Startup Command</span>
-    <span style="width:90px;flex-shrink:0;text-align:right">AMCP Port</span>
+    <span style="width:90px;flex-shrink:0">AMCP Port</span>
+    <span style="width:36px;flex-shrink:0"></span>
   </div>
 
   <div id="instances-tbody"></div>
 
   <div style="display:flex;justify-content:space-between;align-items:center;margin-top:20px">
-    <div style="display:flex;gap:10px">
-      <button class="btn btn-primary" onclick="saveSettings()">Save & Regenerate Configs</button>
-      <button class="btn btn-secondary" onclick="loadSettings()">Reset</button>
-    </div>
+    <button class="btn btn-primary" onclick="saveSettings()">Save & Regenerate Configs</button>
     <button class="btn btn-primary btn-sm" onclick="addInstance()">+ Add Instance</button>
   </div>
   <p style="color:var(--muted);font-size:12px;margin-top:10px">
@@ -968,12 +1035,12 @@ function renderInstanceTable(insts) {
                style="flex:0 0 110px;min-width:0">
         <input type="text" id="inst_ndi_${i}" value="${ndiVal}" placeholder="NDI Name"
                style="flex:0 0 160px;min-width:0">
-        <button class="btn btn-danger btn-sm" style="flex-shrink:0;padding:0 10px;margin-left:auto"
-                onclick="deleteInstance(${i})" title="Delete instance">×</button>
         <input type="number" id="inst_port_${i}" value="${inst.amcp_port || port}"
                placeholder="${port}"
-               style="flex-shrink:0;width:90px;font-size:11px;padding:5px 8px;text-align:right"
+               style="flex-shrink:0;width:90px;font-size:11px;padding:5px 8px;text-align:right;margin-left:auto"
                title="Leave blank or set to 0 to auto-assign (base + position)">
+        <button class="btn btn-danger btn-sm" style="flex-shrink:0;padding:0 10px"
+                onclick="deleteInstance(${i})" title="Remove this instance">×</button>
       </div>
       <div class="ch-edit-source">
         <input type="text" id="inst_url_${i}" value="${urlVal}" placeholder="https://..."
