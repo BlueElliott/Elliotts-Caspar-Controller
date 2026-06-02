@@ -95,7 +95,6 @@ class CasperControllerGUI:
 
         self._cfg = load_config()
         self._web_port = self._cfg.get("web_port", 5280)
-        self._amcp_base_port = self._cfg.get("amcp_base_port", 5250)
 
         self._caspar_running = False
         self._web_running = False
@@ -220,35 +219,24 @@ class CasperControllerGUI:
         content = tk.Frame(root, bg=BG_DARK)
         content.pack(fill=tk.BOTH, expand=True, padx=40, pady=(18, 20))
 
-        # -- Port card --
+        # -- Port card (Web UI port only — AMCP ports managed in Settings) --
         port_cv = tk.Canvas(content, width=670, height=130,
                              bg=BG_DARK, highlightthickness=0)
         port_cv.pack(pady=(0, 12))
         self._rounded_rect(port_cv, 0, 0, 670, 130, 20, BG_CARD)
 
-        # Web UI port (left)
-        port_cv.create_text(220, 20, text="WEB UI PORT", fill=MUTED, font=self.font_bold)
-        self._rounded_rect(port_cv, 150, 32, 290, 82, 12, ACCENT)
+        cx = 335  # centre of 670-wide canvas
+        port_cv.create_text(cx, 20, text="WEB UI PORT", fill=MUTED, font=self.font_bold)
+        self._rounded_rect(port_cv, cx - 70, 32, cx + 70, 82, 12, ACCENT)
         self._port_text_id = port_cv.create_text(
-            220, 57, text=str(self._web_port), fill=TEXT, font=self.font_bold32
+            cx, 57, text=str(self._web_port), fill=TEXT, font=self.font_bold32
         )
-        self._rounded_rect(port_cv, 175, 92, 265, 118, 12, BG_MEDIUM)
-        port_cv.create_text(220, 105, text="Change Port", fill=MUTED, font=(self.font_reg[0], 9))
-
-        # AMCP base port (right)
-        port_cv.create_text(480, 20, text="AMCP BASE PORT", fill=MUTED, font=self.font_bold)
-        self._rounded_rect(port_cv, 410, 32, 550, 82, 12, BTN_GRAY)
-        self._amcp_text_id = port_cv.create_text(
-            480, 57, text=str(self._amcp_base_port), fill=TEXT, font=self.font_bold32
-        )
-        self._rounded_rect(port_cv, 435, 92, 525, 118, 12, BG_MEDIUM)
-        port_cv.create_text(480, 105, text="Change Port", fill=MUTED, font=(self.font_reg[0], 9))
+        self._rounded_rect(port_cv, cx - 55, 92, cx + 55, 118, 12, BG_MEDIUM)
+        port_cv.create_text(cx, 105, text="Change Port", fill=MUTED, font=(self.font_reg[0], 9))
 
         def _port_card_click(e):
-            if 175 <= e.x <= 265 and 92 <= e.y <= 118:
+            if (cx - 55) <= e.x <= (cx + 55) and 92 <= e.y <= 118:
                 self._change_web_port(port_cv)
-            elif 435 <= e.x <= 525 and 92 <= e.y <= 118:
-                self._change_amcp_base_port(port_cv)
         port_cv.bind("<Button-1>", _port_card_click)
         port_cv.bind("<Enter>",    lambda e: port_cv.configure(cursor="hand2"))
         port_cv.bind("<Leave>",    lambda e: port_cv.configure(cursor=""))
@@ -361,11 +349,6 @@ class CasperControllerGUI:
                 BTN_GRAY, w=btn_w, h=btn_h,
             ).pack(side=tk.LEFT, padx=(0, btn_gap))
 
-        if row is None or len(instances) % max_per_row == 0:
-            row = tk.Frame(self._inst_btn_container, bg=BG_DARK)
-            row.pack(fill=tk.X, pady=(0, btn_gap))
-        self._make_btn(row, "↺  All", self._restart_all,
-                       BTN_ORNG, w=80, h=btn_h).pack(side=tk.LEFT, padx=(0, btn_gap))
 
         self._last_instance_sig = self._instance_sig(cfg)
         self.root.after(50, self._fit_window_height)
@@ -405,22 +388,6 @@ class CasperControllerGUI:
                                 f"Web UI port changed to {new_port}.\nRestart the app for the new port to take effect.",
                                 parent=self.root)
 
-    def _change_amcp_base_port(self, port_cv):
-        new_port = simpledialog.askinteger(
-            "Change AMCP Base Port",
-            "Enter the base AMCP port.\nInstances will use base, base+1, base+2…",
-            initialvalue=self._amcp_base_port, minvalue=1024, maxvalue=65535,
-            parent=self.root,
-        )
-        if new_port and new_port != self._amcp_base_port:
-            self._amcp_base_port = new_port
-            cfg = load_config()
-            cfg["amcp_base_port"] = new_port
-            save_config(cfg)
-            port_cv.itemconfig(self._amcp_text_id, text=str(new_port))
-            messagebox.showinfo("AMCP Base Port Changed",
-                                f"Base AMCP port changed to {new_port}.\nRestart CasparCG for changes to take effect.",
-                                parent=self.root)
 
     def _copy_url(self):
         try:
@@ -696,10 +663,10 @@ class CasperControllerGUI:
                     ok = m.start()
                     if ok:
                         res = self._send_instance_load(inst, AMCPClient(port=port))
-                        self._log_to_console(f"Inst {inst['id']} ({inst['name']}) → {res[:60]}")
+                        logger.info(f"Inst {inst['id']} ({inst['name']}) → {res[:60]}")
                         started.append(inst["id"])
                     else:
-                        self._log_to_console(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
+                        logger.warning(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
                         errors.append(inst["id"])
 
                 if started:
@@ -729,8 +696,8 @@ class CasperControllerGUI:
     def _on_caspar_failed(self, reason: str):
         self._status_label.config(text="CasparCG failed to start", fg=ERROR)
         self._enable_btn(self._btn_start, self._start_caspar, "Start CasparCG", BTN_GREEN)
+        logger.error(f"CasparCG failed: {reason}")
         messagebox.showerror("CasparCG Failed", f"Could not start CasparCG:\n\n{reason}", parent=self.root)
-        self._log_to_console(f"ERROR starting CasparCG: {reason}")
 
     def _stop_caspar(self):
         def run():
