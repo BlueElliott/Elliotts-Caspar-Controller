@@ -865,8 +865,8 @@ def page_settings():
       <input type="number" id="web_port" value="5280">
     </div>
     <div class="form-group">
-      <label>Startup Delay (seconds)</label>
-      <input type="number" id="startup_delay" value="8" min="2" max="30">
+      <label>Per-instance startup delay (seconds) <span id="startup-total" style="color:var(--muted);font-size:11px"></span></label>
+      <input type="number" id="startup_delay" value="8" min="2" max="60" oninput="updateStartupTotal()">
     </div>
     <div class="form-group" style="display:flex;align-items:center;gap:10px;padding-top:4px">
       <input type="checkbox" id="autostart_caspar"
@@ -886,7 +886,7 @@ def page_settings():
     <span style="flex:0 0 110px">Name</span>
     <span style="flex:0 0 160px">NDI Name</span>
     <span style="flex:1">URL / Startup Command</span>
-    <span style="width:70px;flex-shrink:0;text-align:right">Port</span>
+    <span style="width:90px;flex-shrink:0;text-align:right">AMCP Port</span>
   </div>
 
   <div id="instances-tbody"></div>
@@ -919,8 +919,10 @@ function loadSettings() {
       type: inst.type || 'html',
       startup_command: inst.startup_command || '',
       url: inst.url || '',
+      amcp_port: inst.amcp_port || 0,
     }));
     renderInstanceTable(currentInstances);
+    updateStartupTotal();
   });
 }
 
@@ -931,6 +933,7 @@ function computedPort(i) {
 function onBasePortChange() {
   currentInstances = getFormInstances();
   renderInstanceTable(currentInstances);
+  updateStartupTotal();
 }
 
 function renderInstanceTable(insts) {
@@ -961,7 +964,10 @@ function renderInstanceTable(insts) {
                style="flex:0 0 160px;min-width:0">
         <button class="btn btn-danger btn-sm" style="flex-shrink:0;padding:0 10px;margin-left:auto"
                 onclick="deleteInstance(${i})" title="Delete instance">×</button>
-        <span style="flex-shrink:0;width:70px;text-align:right;color:var(--muted);font-size:11px">:${port}</span>
+        <input type="number" id="inst_port_${i}" value="${inst.amcp_port || port}"
+               placeholder="${port}"
+               style="flex-shrink:0;width:90px;font-size:11px;padding:5px 8px;text-align:right"
+               title="Leave blank or set to 0 to auto-assign (base + position)">
       </div>
       <div class="ch-edit-source">
         <input type="text" id="inst_url_${i}" value="${urlVal}" placeholder="https://..."
@@ -981,14 +987,28 @@ function toggleType(i) {
 }
 
 function getFormInstances() {
-  return currentInstances.map((inst, i) => ({
-    ...inst,
-    name:            document.getElementById('inst_name_' + i)?.value ?? inst.name,
-    ndi_name:        document.getElementById('inst_ndi_' + i)?.value ?? inst.ndi_name,
-    type:            document.getElementById('inst_type_' + i)?.value ?? inst.type,
-    url:             document.getElementById('inst_url_' + i)?.value ?? inst.url,
-    startup_command: document.getElementById('inst_cmd_' + i)?.value ?? inst.startup_command,
-  }));
+  const base = parseInt(document.getElementById('amcp_base_port').value) || 5250;
+  return currentInstances.map((inst, i) => {
+    const portVal = parseInt(document.getElementById('inst_port_' + i)?.value) || 0;
+    const autoPort = base + i;
+    return {
+      ...inst,
+      name:            document.getElementById('inst_name_' + i)?.value ?? inst.name,
+      ndi_name:        document.getElementById('inst_ndi_' + i)?.value ?? inst.ndi_name,
+      type:            document.getElementById('inst_type_' + i)?.value ?? inst.type,
+      url:             document.getElementById('inst_url_' + i)?.value ?? inst.url,
+      startup_command: document.getElementById('inst_cmd_' + i)?.value ?? inst.startup_command,
+      // Only save explicit port if it differs from auto-computed; 0 means "auto"
+      amcp_port:       (portVal && portVal !== autoPort) ? portVal : 0,
+    };
+  });
+}
+
+function updateStartupTotal() {
+  const delay = parseInt(document.getElementById('startup_delay').value) || 8;
+  const n = currentInstances.length;
+  const el = document.getElementById('startup-total');
+  if (el) el.textContent = n > 0 ? `— ~${delay * n}s total for ${n} instances` : '';
 }
 
 function moveUp(i) {
@@ -1009,8 +1029,9 @@ function addInstance() {
   currentInstances = getFormInstances();
   const n = currentInstances.length + 1;
   currentInstances.push({ id: n, name: 'INST' + n, ndi_name: 'PCR3 INST' + n,
-                           type: 'html', url: '', startup_command: '' });
+                           type: 'html', url: '', startup_command: '', amcp_port: 0 });
   renderInstanceTable(currentInstances);
+  updateStartupTotal();
   toast('Instance added', 'success');
 }
 
@@ -1020,6 +1041,7 @@ function deleteInstance(i) {
   currentInstances = getFormInstances();
   currentInstances.splice(i, 1);
   renderInstanceTable(currentInstances);
+  updateStartupTotal();
   toast(name + ' deleted', 'warning');
 }
 

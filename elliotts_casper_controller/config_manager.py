@@ -36,7 +36,14 @@ def _config_file() -> str:
 
 
 def instance_amcp_port(cfg: dict, inst: dict) -> int:
-    """Return the AMCP port for an instance: base_port + its position in the list."""
+    """Return the AMCP port for an instance.
+
+    Uses inst['amcp_port'] if explicitly set (non-zero), otherwise falls back
+    to base_port + position in the instances list.
+    """
+    override = inst.get("amcp_port")
+    if override:
+        return int(override)
     base = cfg.get("amcp_base_port", 5250)
     for i, x in enumerate(cfg.get("instances", [])):
         if x["id"] == inst["id"]:
