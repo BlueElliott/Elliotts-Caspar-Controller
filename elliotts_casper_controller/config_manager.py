@@ -113,8 +113,21 @@ def caspar_instance_config_path(config: dict, inst: dict) -> str:
 
 
 def regenerate_instance_config(config: dict, inst: dict) -> str:
-    """Write a single-channel casparcg.config for one instance. Returns the path written."""
+    """Write a single-channel casparcg.config for one instance. Returns the path written.
+
+    Each instance gets its own log\ and data\ subdirectory to prevent file-locking
+    conflicts when multiple CasparCG processes run from the same folder simultaneously.
+    """
     port = instance_amcp_port(config, inst)
+    inst_id = inst["id"]
+
+    # Pre-create per-instance subdirs so CasparCG doesn't fail trying to write them
+    exe = config.get("caspar_exe_path", "")
+    if exe and os.path.isabs(exe):
+        exe_dir = os.path.dirname(exe)
+        for subdir in (f"log\\inst_{inst_id}", f"data\\inst_{inst_id}"):
+            os.makedirs(os.path.join(exe_dir, subdir), exist_ok=True)
+
     xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <configuration>
   <log-level>info</log-level>
@@ -134,8 +147,8 @@ def regenerate_instance_config(config: dict, inst: dict) -> str:
 
   <paths>
     <media-path>media\\</media-path>
-    <log-path>log\\</log-path>
-    <data-path>data\\</data-path>
+    <log-path>log\\inst_{inst_id}\\</log-path>
+    <data-path>data\\inst_{inst_id}\\</data-path>
     <template-path>template\\</template-path>
   </paths>
 
