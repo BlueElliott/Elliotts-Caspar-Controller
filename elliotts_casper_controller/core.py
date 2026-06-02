@@ -935,8 +935,20 @@ setInterval(updateStatus, 4000);
 
 
 
+def _get_network_ip() -> str:
+    import socket as _socket
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
 @app.get("/http-generator", response_class=HTMLResponse)
 def page_http_generator():
+    cfg = load_config()
+    network_base = f"http://{_get_network_ip()}:{cfg.get('web_port', 5280)}"
     body = """
 <p style="color:var(--muted);margin-bottom:20px">
   Select an instance and clip to generate a ready-to-use HTTP GET URL.
@@ -996,7 +1008,7 @@ def page_http_generator():
     or any automation system that supports HTTP requests.
   </p>
   <div style="margin-top:12px;background:var(--input-bg);border-radius:8px;padding:12px 16px;font-family:Consolas,monospace;font-size:12px;color:var(--muted)">
-    curl "http://YOUR_IP:PORT/api/load?instance=Clipplayer&clip=MYCLIP"
+    curl "NETWORK_BASE/api/load?instance=Clipplayer&clip=MYCLIP"
   </div>
 </div>
 """
@@ -1037,8 +1049,8 @@ function onSelectionChange() {
     return;
   }
 
-  const base = window.location.origin;
-  let url = `${base}/api/load?instance=${encodeURIComponent(instance)}&clip=${encodeURIComponent(clip)}`;
+  const base = 'NETWORK_BASE';
+  let url = base + '/api/load?instance=' + encodeURIComponent(instance) + '&clip=' + encodeURIComponent(clip);
   if (loopVal === 'false') url += '&loop=false';
 
   urlEl.textContent = url;
@@ -1079,6 +1091,8 @@ function fallbackCopy(text, cb) {
 
 loadData();
 """
+    body = body.replace("NETWORK_BASE", network_base)
+    js   = js.replace("NETWORK_BASE", network_base)
     return HTMLResponse(page("HTTP Generator", "http-generator", body, js))
 
 
