@@ -645,6 +645,58 @@ def api_instance_stream(inst_id: int):
     )
 
 
+@app.get("/api/load")
+def api_load_clip(instance: str, clip: str, loop: bool = True):
+    """Load a clip into a named media instance via HTTP GET.
+
+    Usage: GET /api/load?instance=Clipplayer&clip=MYCLIP
+    Optional: &loop=false to play once without looping.
+
+    Designed for external triggers (hardware controllers, automation systems).
+    """
+    cfg = load_config()
+    inst = next(
+        (i for i in cfg.get("instances", []) if i["name"].lower() == instance.lower()),
+        None,
+    )
+    if not inst:
+        raise HTTPException(status_code=404, detail=f"Instance '{instance}' not found")
+    if inst.get("type", "html") != "media":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Instance '{instance}' is not a media type — only media instances support clip loading",
+        )
+    port = instance_amcp_port(cfg, inst)
+    client = AMCPClient(port=port)
+    loop_str = " LOOP" if loop else ""
+    cmd = f'PLAY 1-1 "{clip}"{loop_str}'
+    res = client.send(cmd)
+    _log_event(f"HTTP load: {instance} → {cmd} → {res[:60]}")
+    return {"ok": True, "instance": instance, "clip": clip, "command": cmd, "response": res}
+
+
+@app.get("/api/instance/{inst_id}/load")
+def api_instance_load_clip(inst_id: int, clip: str, loop: bool = True):
+    """Load a clip into a media instance by ID via HTTP GET.
+
+    Usage: GET /api/instance/6/load?clip=MYCLIP
+    """
+    cfg = load_config()
+    inst_map = {i["id"]: i for i in cfg.get("instances", [])}
+    if inst_id not in inst_map:
+        raise HTTPException(status_code=404, detail=f"Instance {inst_id} not found")
+    inst = inst_map[inst_id]
+    if inst.get("type", "html") != "media":
+        raise HTTPException(status_code=400, detail=f"Instance {inst_id} is not a media type")
+    port = instance_amcp_port(cfg, inst)
+    client = AMCPClient(port=port)
+    loop_str = " LOOP" if loop else ""
+    cmd = f'PLAY 1-1 "{clip}"{loop_str}'
+    res = client.send(cmd)
+    _log_event(f"HTTP load: Inst {inst_id} ({inst['name']}) → {cmd} → {res[:60]}")
+    return {"ok": True, "instance": inst["name"], "clip": clip, "command": cmd, "response": res}
+
+
 @app.get("/api/media")
 def api_media():
     cfg = load_config()
@@ -709,7 +761,6 @@ def page_dashboard():
     <div style="display:flex;gap:8px">
       <button class="btn btn-success" onclick="serverAction('start')">Start All</button>
       <button class="btn btn-danger"  onclick="serverAction('stop')">Stop All</button>
-      <button class="btn btn-warning" onclick="restartAll()">Restart All</button>
     </div>
   </div>
 </div>
@@ -754,6 +805,11 @@ function renderInstances(instances) {
     const sourceInfo = isHtml
       ? ''
       : `<div class="ch-ndi" style="color:var(--warning);font-size:11px">${inst.startup_command || '(no startup command)'}</div>`;
+    const loadUrl = !isHtml ? `
+      <div style="font-size:10px;color:var(--muted);font-family:monospace;background:var(--input-bg);
+                  padding:5px 8px;border-radius:6px;word-break:break-all;margin-top:2px">
+        GET /api/load?instance=${encodeURIComponent(inst.name)}&amp;clip=CLIP_NAME
+      </div>` : '';
     const amcpRow = !isHtml ? `
       <div style="display:flex;gap:4px;margin-top:4px">
         <select id="media_${inst.id}"
@@ -777,13 +833,11 @@ function renderInstances(instances) {
       <div class="ch-name">${inst.name}</div>
       <div class="ch-ndi">NDI: ${inst.ndi_name}</div>
       ${sourceInfo}
+      ${loadUrl}
       <span class="badge ${inst.status === 'live' ? 'badge-success' : 'badge-error'}">${inst.status}</span>
       ${inst.status === 'live'
-        ? `<div style="display:flex;gap:6px">
-             <button class="btn btn-warning btn-sm" style="flex:1" onclick="restartInstance(${inst.id}, '${inst.name}')">↺ Restart</button>
-             <button class="btn btn-danger btn-sm" style="flex:1" onclick="stopInstance(${inst.id}, '${inst.name}')">■ Stop</button>
-           </div>`
-        : `<button class="btn btn-success btn-sm" style="width:100%" onclick="restartInstance(${inst.id}, '${inst.name}')">▶ Start</button>`
+        ? `<button class="btn btn-danger btn-sm" style="width:100%" onclick="stopInstance(${inst.id}, '${inst.name}')">■ Stop</button>`
+        : `<button class="btn btn-success btn-sm" style="width:100%" onclick="startInstance(${inst.id}, '${inst.name}')">▶ Start</button>`
       }
       ${amcpRow}
     </div>`;
@@ -840,11 +894,10 @@ function serverAction(action) {
   }).catch(() => toast('Failed to ' + action, 'error'));
 }
 
-function restartInstance(id, name) {
-  toast('Restarting ' + name + ' — stopping process...', 'warning');
+function startInstance(id, name) {
+  toast('Starting ' + name + '...', 'info');
   api('/api/instance/' + id + '/restart', 'POST').then(d => {
-    toast(d.message || (name + ' restarting...'), 'info');
-    // Poll until it comes back live
+    toast(d.message || (name + ' starting...'), 'info');
     let attempts = 0;
     const poll = setInterval(() => {
       attempts++;
@@ -860,15 +913,7 @@ function restartInstance(id, name) {
         }
       });
     }, 2000);
-  }).catch(() => toast('Failed to restart ' + name, 'error'));
-}
-
-function restartAll() {
-  toast('Restarting all instances...', 'warning');
-  api('/api/instance/all/restart', 'POST').then(() => {
-    toast('All instances restarted', 'success');
-    updateStatus();
-  }).catch(() => toast('Failed', 'error'));
+  }).catch(() => toast('Failed to start ' + name, 'error'));
 }
 
 function stopInstance(id, name) {
