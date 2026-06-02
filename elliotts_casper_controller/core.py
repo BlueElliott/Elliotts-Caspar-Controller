@@ -720,6 +720,13 @@ function renderInstances(instances) {
 }
 
 function updateStatus() {
+  // Don't tear down the DOM while the user has a dropdown open
+  if (document.activeElement && document.activeElement.tagName === 'SELECT') {
+    api('/api/log').then(data => {
+      document.getElementById('log-box').innerHTML = data.log.slice().reverse().map(l => `<p>${l}</p>`).join('');
+    });
+    return;
+  }
   api('/api/status').then(data => {
     const running = data.running;
     document.getElementById('pulse').className = 'pulse ' + (running ? 'pulse-green' : 'pulse-red');
