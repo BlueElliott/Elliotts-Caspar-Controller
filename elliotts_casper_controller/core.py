@@ -865,8 +865,9 @@ def page_settings():
       <input type="number" id="web_port" value="5280">
     </div>
     <div class="form-group">
-      <label>Per-instance startup delay (seconds) <span id="startup-total" style="color:var(--muted);font-size:11px"></span></label>
-      <input type="number" id="startup_delay" value="8" min="2" max="60" oninput="updateStartupTotal()">
+      <label>Max wait per instance (seconds) <span id="startup-total" style="color:var(--muted);font-size:11px"></span></label>
+      <input type="number" id="startup_delay" value="60" min="10" max="300" oninput="updateStartupTotal()">
+      <p style="color:var(--muted);font-size:11px;margin-top:4px">Each instance starts as soon as its AMCP port responds — this is only the upper limit before giving up.</p>
     </div>
     <div class="form-group" style="display:flex;align-items:center;gap:10px;padding-top:4px">
       <input type="checkbox" id="autostart_caspar"

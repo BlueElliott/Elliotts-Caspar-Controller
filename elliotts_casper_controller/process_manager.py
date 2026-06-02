@@ -68,12 +68,13 @@ class CasparProcessManager:
                 cwd=self._exe_dir(),
                 startupinfo=si,
             )
-            deadline = time.time() + self.startup_delay + 5
+            # Poll AMCP every second — move on as soon as it responds.
+            # startup_delay is the maximum wait; defaults to 60s so it's
+            # generous enough for cold starts on slow machines.
+            deadline = time.time() + max(self.startup_delay, 30)
             while time.time() < deadline:
                 time.sleep(1)
                 if self._client.ping():
-                    # CasparCG sets its own console title at startup.
-                    # Rename after a short delay so ours wins.
                     threading.Thread(
                         target=self._rename_console_after_delay,
                         daemon=True,

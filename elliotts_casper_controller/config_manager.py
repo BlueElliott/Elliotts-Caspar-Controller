@@ -18,7 +18,7 @@ DEFAULT_CONFIG = {
     "caspar_exe_path": "casparcg.exe",
     "amcp_base_port": 5250,
     "web_port": 5280,
-    "startup_delay": 8,
+    "startup_delay": 60,
     "video_mode": "1080p2500",
     "autostart_caspar": False,
     "instances": [
@@ -85,6 +85,9 @@ def load() -> dict:
     config.setdefault("amcp_base_port", 5250)
     config.setdefault("autostart_caspar", False)
     config.setdefault("instances", list(DEFAULT_CONFIG["instances"]))
+    # Upgrade old short startup_delay — anything ≤ 15 was the old "fixed wait" value
+    if config.get("startup_delay", 60) <= 15:
+        config["startup_delay"] = 60
 
     # Backfill per-instance fields
     for inst in config.get("instances", []):
