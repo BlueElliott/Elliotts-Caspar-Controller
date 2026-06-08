@@ -148,6 +148,11 @@ def regenerate_instance_config(config: dict, inst: dict) -> str:
     </tcp>
   </controllers>
 
+  <html>
+    <remote-debugging-port>0</remote-debugging-port>
+    <enable-gpu>false</enable-gpu>
+  </html>
+
 </configuration>
 """
     out_path = caspar_instance_config_path(config, inst)
