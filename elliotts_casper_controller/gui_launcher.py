@@ -583,41 +583,61 @@ class CasparControllerGUI:
         threading.Thread(target=download, daemon=True).start()
 
     def _apply_update(self, new_exe: str):
-        import shutil
         import subprocess
 
         current_exe = sys.executable
-        old_exe = current_exe + ".old"
+        pid = os.getpid()
+
+        # PowerShell script: wait for this PID to exit (handles are released on
+        # ExitProcess), move the downloaded exe over the original, then relaunch.
+        ps_path = os.path.join(os.path.dirname(new_exe), "update.ps1")
+        ps = f"""
+$pid_to_wait = {pid}
+$new  = '{new_exe}'
+$dest = '{current_exe}'
+
+# Wait up to 30s for the process to fully exit
+$deadline = (Get-Date).AddSeconds(30)
+while ((Get-Date) -lt $deadline) {{
+    $proc = Get-Process -Id $pid_to_wait -ErrorAction SilentlyContinue
+    if (-not $proc) {{ break }}
+    Start-Sleep -Milliseconds 500
+}}
+
+# Extra pause so Windows fully releases the file handle
+Start-Sleep -Seconds 1
+
+# Replace exe, retry once on failure
+try {{
+    Move-Item -Path $new -Destination $dest -Force -ErrorAction Stop
+}} catch {{
+    Start-Sleep -Seconds 2
+    Move-Item -Path $new -Destination $dest -Force
+}}
+
+# Relaunch
+Start-Process -FilePath $dest
+"""
+        with open(ps_path, "w") as f:
+            f.write(ps)
 
         self._status_label.config(text="Applying update — relaunching...", fg=MUTED)
-        try:
-            # On Windows you can rename a running exe (held by handle, not path).
-            # Remove any leftover .old from a previous update first.
-            if os.path.exists(old_exe):
-                os.remove(old_exe)
-            os.rename(current_exe, old_exe)   # rename running exe — always works
-            shutil.move(new_exe, current_exe) # place new exe at original path
-        except Exception as e:
-            # Rollback if anything went wrong
-            try:
-                if not os.path.exists(current_exe) and os.path.exists(old_exe):
-                    os.rename(old_exe, current_exe)
-            except Exception:
-                pass
-            messagebox.showerror("Update Failed",
-                                 f"Could not replace the executable:\n{e}\n\n"
-                                 "The app has not been changed.",
-                                 parent=self.root)
-            self._enable_btn(self._btn_update, self._do_auto_update,
-                             f"Install v{getattr(self, '_pending_latest', '?')}", BTN_ORNG)
-            return
 
-        # Launch the new exe detached, then hard-exit so Windows releases all handles
+        # CREATE_NO_WINDOW keeps PowerShell alive without a visible console.
+        # DETACHED_PROCESS kills PowerShell immediately so must not be used.
+        CREATE_NO_WINDOW = 0x08000000
         subprocess.Popen(
-            [current_exe],
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            [
+                "powershell.exe", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", ps_path,
+            ],
+            creationflags=CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
         )
-        os._exit(0)
+
+        # Hard-exit: os._exit bypasses Python cleanup and calls ExitProcess()
+        # directly, guaranteeing Windows releases the exe file handle immediately.
+        self.root.after(300, lambda: os._exit(0))
 
     def _up_to_date(self):
         self._redraw_btn(self._btn_update, "Up to Date ✓", SUCCESS, tk.NORMAL)
