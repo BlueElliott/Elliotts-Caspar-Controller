@@ -52,7 +52,8 @@ def _make_manager(inst: dict, cfg: dict) -> CasparProcessManager:
 def _load_instance(inst: dict, client: AMCPClient) -> str:
     """Send the startup command for an instance (always channel 1 in each CasparCG process)."""
     if inst.get("type", "html") == "html":
-        return client.play_html(1, inst.get("url", ""))
+        url = inst.get("url", "").strip()
+        return client.play_html(1, url) if url else client.send("CLEAR 1")
     cmd = inst.get("startup_command", "").strip()
     return client.send(cmd) if cmd else client.send("CLEAR 1")
 
@@ -700,23 +701,45 @@ def page_dashboard():
 let lastRunning = null;
 let _mediaClips = [];
 
+const TEST_PATTERNS = [
+  { label: 'Black',       cmd: 'PLAY 1-1 COLOR #00000000' },
+  { label: 'White',       cmd: 'PLAY 1-1 COLOR #FFFFFFFF' },
+  { label: 'Red',         cmd: 'PLAY 1-1 COLOR #FF0000FF' },
+  { label: 'Green',       cmd: 'PLAY 1-1 COLOR #00FF00FF' },
+  { label: 'Blue',        cmd: 'PLAY 1-1 COLOR #0000FFFF' },
+  { label: 'Colour Bars', cmd: 'PLAY 1-1 COLOR #808080FF' },
+];
+
+function _buildMediaOptions(clips, current) {
+  let html = '<option value="">— pick a clip —</option>';
+  html += clips.map(c => `<option value="CLIP:${c}"${('CLIP:'+c)===current?' selected':''}>${c}</option>`).join('');
+  html += '<option disabled>─── Test Patterns ───</option>';
+  html += TEST_PATTERNS.map(t =>
+    `<option value="TEST:${t.cmd}"${ ('TEST:'+t.cmd)===current?' selected':''}>${t.label}</option>`
+  ).join('');
+  return html;
+}
+
 function loadMediaClips() {
   api('/api/media').then(data => {
     _mediaClips = data.clips || [];
     document.querySelectorAll('[id^="media_"]').forEach(sel => {
-      const id = sel.id.split('_')[1];
       const current = sel.value;
-      sel.innerHTML = '<option value="">— pick a clip —</option>' +
-        _mediaClips.map(c => `<option value="${c}"${c===current?' selected':''}>${c}</option>`).join('');
+      sel.innerHTML = _buildMediaOptions(_mediaClips, current);
     });
   });
 }
 
 function onMediaSelect(id) {
   const sel = document.getElementById('media_' + id);
-  const clip = sel.value;
-  if (!clip) return;
-  document.getElementById('amcp_' + id).value = `PLAY 1-1 "${clip}" LOOP`;
+  const val = sel.value;
+  if (!val) return;
+  if (val.startsWith('TEST:')) {
+    document.getElementById('amcp_' + id).value = val.slice(5);
+  } else if (val.startsWith('CLIP:')) {
+    const clip = val.slice(5);
+    document.getElementById('amcp_' + id).value = `PLAY 1-1 "${clip}" LOOP`;
+  }
 }
 
 function renderInstances(instances) {

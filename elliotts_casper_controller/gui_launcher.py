@@ -728,7 +728,8 @@ class CasperControllerGUI:
     @staticmethod
     def _send_instance_load(inst: dict, client: AMCPClient) -> str:
         if inst.get("type", "html") == "html":
-            return client.play_html(1, inst.get("url", ""))
+            url = inst.get("url", "").strip()
+            return client.play_html(1, url) if url else client.send("CLEAR 1")
         cmd = inst.get("startup_command", "").strip()
         return client.send(cmd) if cmd else client.send("CLEAR 1")
 
