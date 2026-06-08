@@ -734,9 +734,11 @@ function _buildMediaOptions(clips, current) {
   let html = '<option value="">— pick a clip —</option>';
   html += clips.map(c => `<option value="CLIP:${c}"${('CLIP:'+c)===current?' selected':''}>${c}</option>`).join('');
   html += '<option disabled>─── Test Patterns ───</option>';
-  html += TEST_PATTERNS.map(t =>
-    `<option value="TEST:${t.cmd}"${ ('TEST:'+t.cmd)===current?' selected':''}>${t.label}</option>`
-  ).join('');
+  html += TEST_PATTERNS.map(t => {
+    const escaped = t.cmd.replace(/"/g, '&quot;');
+    const sel = ('TEST:'+t.cmd)===current?' selected':'';
+    return `<option value="TEST:${escaped}"${sel}>${t.label}</option>`;
+  }).join('');
   return html;
 }
 
