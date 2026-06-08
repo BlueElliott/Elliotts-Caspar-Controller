@@ -688,7 +688,7 @@ def page_dashboard():
       <span id="server-status-label">Checking...</span>
     </div>
     <div style="display:flex;gap:8px">
-      <button class="btn btn-success" onclick="serverAction('start')">Start All</button>
+      <button class="btn btn-success" id="btn-start" onclick="serverAction('start')">Start All</button>
       <button class="btn btn-danger"  onclick="serverAction('stop')">Stop All</button>
     </div>
   </div>
@@ -793,6 +793,19 @@ function updateStatus() {
       ? `CasparCG Running — ${liveCount}/${total} instances`
       : 'CasparCG Stopped';
 
+    const btnStart = document.getElementById('btn-start');
+    if (btnStart) {
+      const allRunning = total > 0 && liveCount === total;
+      btnStart.disabled = allRunning;
+      btnStart.style.opacity = allRunning ? '0.4' : '';
+      btnStart.style.cursor  = allRunning ? 'not-allowed' : '';
+      btnStart.textContent = allRunning
+        ? `All Running (${total}/${total})`
+        : liveCount > 0
+          ? `Start Remaining (${total - liveCount})`
+          : 'Start All';
+    }
+
     if (!skipRender) {
       // Preserve user input across re-renders
       const saved = {};
@@ -817,6 +830,10 @@ function updateStatus() {
 }
 
 function serverAction(action) {
+  if (action === 'start') {
+    const btn = document.getElementById('btn-start');
+    if (btn && btn.disabled) return;
+  }
   toast('Sending ' + action + '...', 'info');
   api('/api/server/' + action, 'POST').then(d => {
     toast(d.message || (action + ' OK'), 'success');

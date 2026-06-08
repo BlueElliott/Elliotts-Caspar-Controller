@@ -457,6 +457,8 @@ class CasperControllerGUI:
             cfg = load_config()
             if cfg.get("autostart_caspar"):
                 self.root.after(800, self._auto_start_caspar)
+            # Silent update check on startup — shows button only if update found
+            self.root.after(2000, lambda: self._check_updates(silent=True))
             return
 
         if self._server_error:
@@ -488,23 +490,25 @@ class CasperControllerGUI:
     # CasparCG process management
     # -----------------------------------------------------------------------
 
-    def _check_updates(self):
-        self._disable_btn(self._btn_update, "Checking...")
+    def _check_updates(self, silent: bool = False):
+        if not silent:
+            self._disable_btn(self._btn_update, "Checking...")
         def run():
             try:
-                import urllib.request, json as _json
+                import requests as _req
                 url = "https://api.github.com/repos/BlueElliott/Elliotts-Casper-Controller/releases/latest"
-                req = urllib.request.Request(url, headers={"User-Agent": "ElliotsCasperController"})
-                with urllib.request.urlopen(req, timeout=8) as r:
-                    data = _json.loads(r.read())
+                r = _req.get(url, headers={"User-Agent": "ElliotsCasperController"}, timeout=8)
+                data = r.json()
                 latest = data.get("tag_name", "").lstrip("v")
                 current = __version__
                 if latest and latest != current:
                     self.root.after(0, lambda: self._update_available(latest, data.get("html_url", "")))
                 else:
-                    self.root.after(0, self._up_to_date)
+                    if not silent:
+                        self.root.after(0, self._up_to_date)
             except Exception as e:
-                self.root.after(0, lambda: self._update_error(str(e)))
+                if not silent:
+                    self.root.after(0, lambda: self._update_error(str(e)))
         threading.Thread(target=run, daemon=True).start()
 
     def _update_available(self, latest: str, url: str):
