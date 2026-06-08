@@ -711,14 +711,25 @@ class CasperControllerGUI:
                 if overall:
                     # Always update count so it reflects instances coming up/down during restarts
                     tot = len(instances)
+                    all_up = running_count == tot
                     self.root.after(0, lambda rc=running_count, t=tot:
                                     self._status_label.config(
                                         text=f"CasparCG running — {rc}/{t} instances", fg=SUCCESS))
+                    if all_up:
+                        self.root.after(0, lambda: self._disable_btn(self._btn_start, "All Running"))
+                    else:
+                        remaining = tot - running_count
+                        self.root.after(0, lambda r=remaining: self._enable_btn(
+                            self._btn_start, self._start_caspar, f"Start Remaining ({r})", BTN_GREEN))
                     if not self._caspar_running:
                         self._caspar_running = True
                 elif self._caspar_running:
                     self._caspar_running = False
                     self.root.after(0, self._on_caspar_stopped)
+                else:
+                    # Nothing running — ensure Start button is active
+                    self.root.after(0, lambda: self._enable_btn(
+                        self._btn_start, self._start_caspar, "Start CasparCG", BTN_GREEN))
             except Exception:
                 pass
             self.root.after(4000, self._poll_caspar_status)
