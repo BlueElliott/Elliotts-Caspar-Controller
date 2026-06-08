@@ -15,6 +15,7 @@ from elliotts_casper_controller.amcp_client import AMCPClient
 from elliotts_casper_controller.config_manager import (
     load as load_config, save as save_config,
     instance_amcp_port, regenerate_instance_config, regenerate_all_instance_configs,
+    ensure_test_pattern_images,
 )
 from elliotts_casper_controller.process_manager import CasparProcessManager
 
@@ -336,22 +337,6 @@ def static_file(filename: str):
     raise HTTPException(status_code=404)
 
 
-@app.get("/test/{hex_colour}", response_class=HTMLResponse)
-def test_pattern(hex_colour: str):
-    """Serve a solid-colour page for CasparCG HTML producer test patterns.
-
-    hex_colour should be RRGGBBAA (e.g. FF0000FF for opaque red).
-    The alpha byte is used as CSS opacity so the fill is always opaque to the compositor.
-    """
-    import re
-    if not re.fullmatch(r"[0-9A-Fa-f]{6,8}", hex_colour):
-        raise HTTPException(status_code=400, detail="hex must be 6 or 8 hex chars")
-    css_hex = "#" + hex_colour[:6]
-    return HTMLResponse(
-        f'<!DOCTYPE html><html><head><meta charset="UTF-8">'
-        f'<style>*{{margin:0;padding:0}}html,body{{width:100%;height:100%;background:{css_hex}}}</style>'
-        f'</head><body></body></html>'
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -410,8 +395,9 @@ def api_server_start():
     if not instances:
         raise HTTPException(status_code=400, detail="No instances configured")
 
-    # Write all config files before launching
+    # Write all config files and test pattern images before launching
     regenerate_all_instance_configs(cfg)
+    ensure_test_pattern_images(cfg)
 
     # Always kill every running CasparCG before launching fresh.
     # Conditional kill (only when AMCP responds) misses instances on stale ports
@@ -683,8 +669,6 @@ def api_log():
 
 @app.get("/", response_class=HTMLResponse)
 def page_dashboard():
-    cfg = load_config()
-    web_port = cfg.get("web_port", 5280)
     body = """
 <div id="setup-banner" style="display:none;background:rgba(245,158,11,0.12);border:2px solid var(--warning);border-radius:12px;padding:20px 24px;margin-bottom:16px">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
@@ -721,47 +705,22 @@ def page_dashboard():
 let lastRunning = null;
 let _mediaClips = [];
 
-const TEST_PATTERNS = [
-  { label: 'Black',  cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/000000FF"' },
-  { label: 'White',  cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/FFFFFFFF"' },
-  { label: 'Red',    cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/FF0000FF"' },
-  { label: 'Green',  cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/00FF00FF"' },
-  { label: 'Blue',   cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/0000FFFF"' },
-  { label: 'Grey',   cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/808080FF"' },
-];
-
-function _buildMediaOptions(clips, current) {
-  let html = '<option value="">— pick a clip —</option>';
-  html += clips.map(c => `<option value="CLIP:${c}"${('CLIP:'+c)===current?' selected':''}>${c}</option>`).join('');
-  html += '<option disabled>─── Test Patterns ───</option>';
-  html += TEST_PATTERNS.map(t => {
-    const escaped = t.cmd.replace(/"/g, '&quot;');
-    const sel = ('TEST:'+t.cmd)===current?' selected':'';
-    return `<option value="TEST:${escaped}"${sel}>${t.label}</option>`;
-  }).join('');
-  return html;
-}
 
 function loadMediaClips() {
   api('/api/media').then(data => {
     _mediaClips = data.clips || [];
     document.querySelectorAll('[id^="media_"]').forEach(sel => {
       const current = sel.value;
-      sel.innerHTML = _buildMediaOptions(_mediaClips, current);
+      sel.innerHTML = '<option value="">— pick a clip —</option>' +
+        _mediaClips.map(c => `<option value="${c}"${c===current?' selected':''}>${c}</option>`).join('');
     });
   });
 }
 
 function onMediaSelect(id) {
-  const sel = document.getElementById('media_' + id);
-  const val = sel.value;
-  if (!val) return;
-  if (val.startsWith('TEST:')) {
-    document.getElementById('amcp_' + id).value = val.slice(5);
-  } else if (val.startsWith('CLIP:')) {
-    const clip = val.slice(5);
-    document.getElementById('amcp_' + id).value = `PLAY 1-1 "${clip}" LOOP`;
-  }
+  const clip = document.getElementById('media_' + id).value;
+  if (!clip) return;
+  document.getElementById('amcp_' + id).value = `PLAY 1-1 "${clip}" LOOP`;
 }
 
 function renderInstances(instances) {
@@ -900,7 +859,6 @@ function sendAmcp(id) {
 updateStatus();
 setInterval(updateStatus, 4000);
 """
-    js = js.replace("WEB_PORT", str(web_port))
     return HTMLResponse(page("Dashboard", "dashboard", body, js))
 
 

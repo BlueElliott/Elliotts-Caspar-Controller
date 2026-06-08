@@ -171,3 +171,35 @@ def regenerate_instance_config(config: dict, inst: dict) -> str:
 def regenerate_all_instance_configs(config: dict) -> list:
     """Regenerate config files for every instance. Returns list of paths written."""
     return [regenerate_instance_config(config, inst) for inst in config.get("instances", [])]
+
+
+_TEST_COLOURS = {
+    "TEST_BLACK": (0,   0,   0),
+    "TEST_WHITE": (255, 255, 255),
+    "TEST_RED":   (255, 0,   0),
+    "TEST_GREEN": (0,   255, 0),
+    "TEST_BLUE":  (0,   0,   255),
+    "TEST_GREY":  (128, 128, 128),
+}
+
+
+def ensure_test_pattern_images(config: dict) -> None:
+    """Write solid-colour PNG test pattern images into the CasparCG media folder.
+
+    Called on every server start so test clips are always available.
+    Skips if exe path is not set or media folder doesn't exist yet.
+    """
+    exe = config.get("caspar_exe_path", "")
+    if not exe or not os.path.isabs(exe):
+        return
+    media_dir = os.path.join(os.path.dirname(exe), "media")
+    os.makedirs(media_dir, exist_ok=True)
+    try:
+        from PIL import Image
+        for name, rgb in _TEST_COLOURS.items():
+            path = os.path.join(media_dir, f"{name}.png")
+            if not os.path.exists(path):
+                img = Image.new("RGB", (1920, 1080), rgb)
+                img.save(path)
+    except Exception:
+        pass
