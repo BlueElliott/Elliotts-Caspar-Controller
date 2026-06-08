@@ -22,7 +22,13 @@ DEFAULT_CONFIG = {
 
 
 def _config_file() -> str:
-    return os.path.join(_config_dir(), "elliotts_casper_config.json")
+    d = _config_dir()
+    new_path = os.path.join(d, "elliotts_caspar_config.json")
+    old_path = os.path.join(d, "elliotts_casper_config.json")
+    # Migrate old misspelled filename on first run
+    if not os.path.exists(new_path) and os.path.exists(old_path):
+        os.rename(old_path, new_path)
+    return new_path
 
 
 def instance_amcp_port(cfg: dict, inst: dict) -> int:

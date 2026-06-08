@@ -1,0 +1,66 @@
+{
+  "caspar_exe_path": "casparcg.exe",
+  "amcp_port": 5250,
+  "web_port": 5280,
+  "startup_delay": 8,
+  "video_mode": "1080p2500",
+  "autostart_caspar": true,
+  "channels": [
+    {
+      "startup_command": "",
+      "url": "https://example.com/GFX1",
+      "name": "GFX1",
+      "ndi_name": "PCR3 GFX1",
+      "type": "html",
+      "number": 1
+    },
+    {
+      "startup_command": "",
+      "url": "https://example.com/GFX2",
+      "name": "GFX2",
+      "ndi_name": "PCR3 GFX2",
+      "type": "html",
+      "number": 2
+    },
+    {
+      "startup_command": "",
+      "url": "https://example.com/GFX3",
+      "name": "GFX3",
+      "ndi_name": "PCR3 GFX3",
+      "type": "html",
+      "number": 3
+    },
+    {
+      "startup_command": "",
+      "url": "https://example.com/GFX4",
+      "name": "GFX4",
+      "ndi_name": "PCR3 GFX4",
+      "type": "html",
+      "number": 4
+    },
+    {
+      "startup_command": "",
+      "url": "https://example.com/PVW",
+      "name": "GFXPVW",
+      "ndi_name": "PCR3 GFXPVW",
+      "type": "html",
+      "number": 5
+    },
+    {
+      "startup_command": "PLAY 6-1 LOOP",
+      "url": "",
+      "name": "MEDIA1",
+      "ndi_name": "PCR3 MEDIA1",
+      "type": "media",
+      "number": 6
+    },
+    {
+      "number": 7,
+      "name": "CH7",
+      "ndi_name": "PCR3 CH7",
+      "type": "html",
+      "url": "",
+      "startup_command": ""
+    }
+  ]
+}
