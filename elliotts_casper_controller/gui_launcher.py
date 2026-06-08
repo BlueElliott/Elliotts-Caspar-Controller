@@ -496,13 +496,19 @@ class CasparControllerGUI:
         def run():
             try:
                 import requests as _req
-                url = "https://api.github.com/repos/BlueElliott/Elliotts-Casper-Controller/releases/latest"
+                url = "https://api.github.com/repos/BlueElliott/Elliotts-Caspar-Controller/releases/latest"
                 r = _req.get(url, headers={"User-Agent": "ElliotsCasparController"}, timeout=8)
                 data = r.json()
                 latest = data.get("tag_name", "").lstrip("v")
                 current = __version__
                 if latest and latest != current:
-                    self.root.after(0, lambda: self._update_available(latest, data.get("html_url", "")))
+                    # Find the .exe asset download URL
+                    exe_url = None
+                    for asset in data.get("assets", []):
+                        if asset.get("name", "").endswith(".exe"):
+                            exe_url = asset.get("browser_download_url")
+                            break
+                    self.root.after(0, lambda: self._update_available(latest, data.get("html_url", ""), exe_url))
                 else:
                     if not silent:
                         self.root.after(0, self._up_to_date)
@@ -511,11 +517,98 @@ class CasparControllerGUI:
                     self.root.after(0, lambda: self._update_error(str(e)))
         threading.Thread(target=run, daemon=True).start()
 
-    def _update_available(self, latest: str, url: str):
-        self._redraw_btn(self._btn_update, f"v{latest} Available!", BTN_ORNG, tk.NORMAL)
-        self._enable_btn(self._btn_update, lambda: webbrowser.open(url),
-                         f"v{latest} Available!", BTN_ORNG)
+    def _update_available(self, latest: str, release_url: str, exe_url: str | None):
+        if exe_url and getattr(sys, "frozen", False):
+            # Running as a frozen exe — offer one-click auto-update
+            self._pending_exe_url = exe_url
+            self._pending_latest = latest
+            self._redraw_btn(self._btn_update, f"Install v{latest}", BTN_ORNG, tk.NORMAL)
+            self._enable_btn(self._btn_update, self._do_auto_update,
+                             f"Install v{latest}", BTN_ORNG)
+        else:
+            # Running from source — open release page instead
+            self._redraw_btn(self._btn_update, f"v{latest} Available!", BTN_ORNG, tk.NORMAL)
+            self._enable_btn(self._btn_update, lambda: webbrowser.open(release_url),
+                             f"v{latest} Available!", BTN_ORNG)
         self._status_label.config(text=f"Update available: v{latest}", fg=WARNING)
+
+    def _do_auto_update(self):
+        import tempfile
+        import requests as _req
+
+        exe_url = getattr(self, "_pending_exe_url", None)
+        latest = getattr(self, "_pending_latest", "?")
+        if not exe_url:
+            return
+
+        confirmed = messagebox.askyesno(
+            "Install Update",
+            f"Download and install v{latest} now?\n\n"
+            "The app will close and relaunch automatically.",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+
+        self._disable_btn(self._btn_update, "Downloading...")
+        self._status_label.config(text=f"Downloading v{latest}...", fg=MUTED)
+
+        current_exe = sys.executable
+        tmp_dir = tempfile.mkdtemp()
+        new_exe = os.path.join(tmp_dir, "update.exe")
+        bat_path = os.path.join(tmp_dir, "update.bat")
+
+        def download():
+            try:
+                r = _req.get(exe_url, stream=True, timeout=60,
+                             headers={"User-Agent": "ElliotsCasparController"})
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                with open(new_exe, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total:
+                                pct = int(downloaded * 100 / total)
+                                self.root.after(0, lambda p=pct: self._disable_btn(
+                                    self._btn_update, f"Downloading {p}%..."))
+
+                # Write a bat script: wait for this process to exit, swap exe, relaunch
+                bat = f"""@echo off
+:wait
+tasklist /fi "PID eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >nul
+    goto wait
+)
+move /y "{new_exe}" "{current_exe}"
+start "" "{current_exe}"
+del "%~f0"
+"""
+                with open(bat_path, "w") as f:
+                    f.write(bat)
+
+                self.root.after(0, self._apply_update, bat_path)
+
+            except Exception as e:
+                self.root.after(0, lambda: self._update_error(f"Download failed: {e}"))
+                self.root.after(0, lambda: self._enable_btn(
+                    self._btn_update, self._do_auto_update, f"Install v{latest}", BTN_ORNG))
+
+        threading.Thread(target=download, daemon=True).start()
+
+    def _apply_update(self, bat_path: str):
+        import subprocess
+        self._status_label.config(text="Applying update — relaunching...", fg=MUTED)
+        # Launch the bat detached so it survives this process exiting
+        subprocess.Popen(
+            ["cmd.exe", "/c", bat_path],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+        )
+        self.root.after(500, self.root.destroy)
 
     def _up_to_date(self):
         self._redraw_btn(self._btn_update, "Up to Date ✓", SUCCESS, tk.NORMAL)
