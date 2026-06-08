@@ -575,15 +575,23 @@ class CasparControllerGUI:
                                 self.root.after(0, lambda p=pct: self._disable_btn(
                                     self._btn_update, f"Downloading {p}%..."))
 
+                pid = os.getpid()
                 # Write a bat script: wait for this process to exit, swap exe, relaunch
                 bat = f"""@echo off
 :wait
-tasklist /fi "PID eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul
+tasklist /fi "PID eq {pid}" /fo csv 2>nul | find /i "{pid}" >nul
 if not errorlevel 1 (
     timeout /t 1 /nobreak >nul
     goto wait
 )
+rem Give Windows a moment to fully release the file lock
+timeout /t 2 /nobreak >nul
 move /y "{new_exe}" "{current_exe}"
+if errorlevel 1 (
+    echo Move failed, retrying...
+    timeout /t 2 /nobreak >nul
+    move /y "{new_exe}" "{current_exe}"
+)
 start "" "{current_exe}"
 del "%~f0"
 """
@@ -608,7 +616,9 @@ del "%~f0"
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             close_fds=True,
         )
-        self.root.after(500, self.root.destroy)
+        # Use _quit() so uvicorn stops and sys.exit(0) fires — fully releasing
+        # the exe file lock so the bat script can overwrite it
+        self.root.after(500, self._quit)
 
     def _up_to_date(self):
         self._redraw_btn(self._btn_update, "Up to Date ✓", SUCCESS, tk.NORMAL)
