@@ -709,10 +709,17 @@ let _mediaClips = [];
 function loadMediaClips() {
   api('/api/media').then(data => {
     _mediaClips = data.clips || [];
+    const regular = _mediaClips.filter(c => !c.startsWith('TEST_'));
+    const tests   = _mediaClips.filter(c =>  c.startsWith('TEST_'));
     document.querySelectorAll('[id^="media_"]').forEach(sel => {
       const current = sel.value;
-      sel.innerHTML = '<option value="">— pick a clip —</option>' +
-        _mediaClips.map(c => `<option value="${c}"${c===current?' selected':''}>${c}</option>`).join('');
+      let html = '<option value="">— pick a clip —</option>';
+      html += regular.map(c => `<option value="${c}"${c===current?' selected':''}>${c}</option>`).join('');
+      if (tests.length) {
+        html += '<option disabled>─── Test Patterns ───</option>';
+        html += tests.map(c => `<option value="${c}"${c===current?' selected':''}>${c}</option>`).join('');
+      }
+      sel.innerHTML = html;
     });
   });
 }

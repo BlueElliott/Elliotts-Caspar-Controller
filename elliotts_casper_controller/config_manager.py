@@ -182,9 +182,33 @@ _TEST_COLOURS = {
     "TEST_GREY":  (128, 128, 128),
 }
 
+# 7 standard EBU/SMPTE colour bar stripes (100%)
+_SMPTE_BARS = [
+    (255, 255, 255),  # White
+    (255, 255,   0),  # Yellow
+    (  0, 255, 255),  # Cyan
+    (  0, 255,   0),  # Green
+    (255,   0, 255),  # Magenta
+    (255,   0,   0),  # Red
+    (  0,   0, 255),  # Blue
+]
+
+
+def _make_bars_image():
+    from PIL import Image, ImageDraw
+    W, H = 1920, 1080
+    img = Image.new("RGB", (W, H))
+    draw = ImageDraw.Draw(img)
+    bar_w = W // len(_SMPTE_BARS)
+    for i, colour in enumerate(_SMPTE_BARS):
+        x0 = i * bar_w
+        x1 = x0 + bar_w if i < len(_SMPTE_BARS) - 1 else W
+        draw.rectangle([x0, 0, x1, H], fill=colour)
+    return img
+
 
 def ensure_test_pattern_images(config: dict) -> None:
-    """Write solid-colour PNG test pattern images into the CasparCG media folder.
+    """Write solid-colour and bars PNG test patterns into the CasparCG media folder.
 
     Called on every server start so test clips are always available.
     Skips if exe path is not set or media folder doesn't exist yet.
@@ -199,7 +223,9 @@ def ensure_test_pattern_images(config: dict) -> None:
         for name, rgb in _TEST_COLOURS.items():
             path = os.path.join(media_dir, f"{name}.png")
             if not os.path.exists(path):
-                img = Image.new("RGB", (1920, 1080), rgb)
-                img.save(path)
+                Image.new("RGB", (1920, 1080), rgb).save(path)
+        bars_path = os.path.join(media_dir, "TEST_BARS.png")
+        if not os.path.exists(bars_path):
+            _make_bars_image().save(bars_path)
     except Exception:
         pass
