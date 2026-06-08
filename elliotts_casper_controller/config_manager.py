@@ -110,12 +110,18 @@ def regenerate_instance_config(config: dict, inst: dict) -> str:
     port = instance_amcp_port(config, inst)
     inst_id = inst["id"]
 
-    # Pre-create per-instance subdirs so CasparCG doesn't fail trying to write them
+    import shutil
+
     exe = config.get("caspar_exe_path", "")
     if exe and os.path.isabs(exe):
         exe_dir = os.path.dirname(exe)
         for subdir in (f"log\\inst_{inst_id}", f"data\\inst_{inst_id}"):
             os.makedirs(os.path.join(exe_dir, subdir), exist_ok=True)
+        # Wipe the CEF session cache before each start so Chromium never shows
+        # a "Restore pages?" dialog from a previous abrupt kill.
+        html_cache = os.path.join(exe_dir, f"html_cache\\inst_{inst_id}")
+        shutil.rmtree(html_cache, ignore_errors=True)
+        os.makedirs(html_cache, exist_ok=True)
 
     xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <configuration>
@@ -151,6 +157,7 @@ def regenerate_instance_config(config: dict, inst: dict) -> str:
   <html>
     <remote-debugging-port>0</remote-debugging-port>
     <enable-gpu>false</enable-gpu>
+    <cache-path>html_cache\\inst_{inst_id}\\</cache-path>
   </html>
 
 </configuration>

@@ -702,12 +702,12 @@ let lastRunning = null;
 let _mediaClips = [];
 
 const TEST_PATTERNS = [
-  { label: 'Black',       cmd: 'PLAY 1-1 COLOR #00000000' },
-  { label: 'White',       cmd: 'PLAY 1-1 COLOR #FFFFFFFF' },
-  { label: 'Red',         cmd: 'PLAY 1-1 COLOR #FF0000FF' },
-  { label: 'Green',       cmd: 'PLAY 1-1 COLOR #00FF00FF' },
-  { label: 'Blue',        cmd: 'PLAY 1-1 COLOR #0000FFFF' },
-  { label: 'Colour Bars', cmd: 'PLAY 1-1 COLOR #808080FF' },
+  { label: 'Black',  cmd: 'PLAY 1-1 #000000FF' },
+  { label: 'White',  cmd: 'PLAY 1-1 #FFFFFFFF' },
+  { label: 'Red',    cmd: 'PLAY 1-1 #FF0000FF' },
+  { label: 'Green',  cmd: 'PLAY 1-1 #00FF00FF' },
+  { label: 'Blue',   cmd: 'PLAY 1-1 #0000FFFF' },
+  { label: 'Grey',   cmd: 'PLAY 1-1 #808080FF' },
 ];
 
 function _buildMediaOptions(clips, current) {
