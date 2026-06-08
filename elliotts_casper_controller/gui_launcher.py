@@ -533,7 +533,6 @@ class CasparControllerGUI:
         self._status_label.config(text=f"Update available: v{latest}", fg=WARNING)
 
     def _do_auto_update(self):
-        import tempfile
         import requests as _req
 
         exe_url = getattr(self, "_pending_exe_url", None)
@@ -553,8 +552,10 @@ class CasparControllerGUI:
         self._disable_btn(self._btn_update, "Downloading...")
         self._status_label.config(text=f"Downloading v{latest}...", fg=MUTED)
 
-        tmp_dir = tempfile.mkdtemp()
-        new_exe = os.path.join(tmp_dir, "update.exe")
+        # Download into the same folder as the running exe so the swap script
+        # doesn't have to cross drives or deal with temp-folder permissions.
+        exe_dir = os.path.dirname(sys.executable)
+        pending_exe = os.path.join(exe_dir, "ElliottsCasparController_update.exe")
 
         def download():
             try:
@@ -563,7 +564,7 @@ class CasparControllerGUI:
                 r.raise_for_status()
                 total = int(r.headers.get("content-length", 0))
                 downloaded = 0
-                with open(new_exe, "wb") as f:
+                with open(pending_exe, "wb") as f:
                     for chunk in r.iter_content(chunk_size=65536):
                         if chunk:
                             f.write(chunk)
@@ -573,7 +574,7 @@ class CasparControllerGUI:
                                 self.root.after(0, lambda p=pct: self._disable_btn(
                                     self._btn_update, f"Downloading {p}%..."))
 
-                self.root.after(0, lambda: self._apply_update(new_exe))
+                self.root.after(0, lambda: self._apply_update(pending_exe))
 
             except Exception as e:
                 self.root.after(0, lambda: self._update_error(f"Download failed: {e}"))
@@ -582,49 +583,54 @@ class CasparControllerGUI:
 
         threading.Thread(target=download, daemon=True).start()
 
-    def _apply_update(self, new_exe: str):
+    def _apply_update(self, pending_exe: str):
         import subprocess
 
         current_exe = sys.executable
+        exe_dir = os.path.dirname(current_exe)
+        exe_name = os.path.basename(current_exe)
+        old_exe = os.path.join(exe_dir, exe_name + ".old")
         pid = os.getpid()
 
-        # PowerShell script: wait for this PID to exit (handles are released on
-        # ExitProcess), move the downloaded exe over the original, then relaunch.
-        ps_path = os.path.join(os.path.dirname(new_exe), "update.ps1")
-        ps = f"""
-$pid_to_wait = {pid}
-$new  = '{new_exe}'
-$dest = '{current_exe}'
+        # Write the swap script next to the exe so the path is guaranteed
+        # to have no permission issues. Use double-quoted PS strings to handle
+        # any apostrophes in the path (e.g. "Elliott's").
+        ps_path = os.path.join(exe_dir, "update.ps1")
+        # Escape any double-quotes in paths (extremely unlikely but safe)
+        def psq(p):
+            return p.replace('"', '`"')
 
-# Wait up to 30s for the process to fully exit
-$deadline = (Get-Date).AddSeconds(30)
+        ps = f"""$pid_to_wait = {pid}
+$pending = "{psq(pending_exe)}"
+$current = "{psq(current_exe)}"
+$old     = "{psq(old_exe)}"
+
+# Wait up to 60s for the app to fully exit
+$deadline = (Get-Date).AddSeconds(60)
 while ((Get-Date) -lt $deadline) {{
-    $proc = Get-Process -Id $pid_to_wait -ErrorAction SilentlyContinue
-    if (-not $proc) {{ break }}
+    if (-not (Get-Process -Id $pid_to_wait -ErrorAction SilentlyContinue)) {{ break }}
     Start-Sleep -Milliseconds 500
 }}
 
-# Extra pause so Windows fully releases the file handle
-Start-Sleep -Seconds 1
+# Extra pause so Windows fully releases the exe file handle
+Start-Sleep -Seconds 2
 
-# Replace exe, retry once on failure
-try {{
-    Move-Item -Path $new -Destination $dest -Force -ErrorAction Stop
-}} catch {{
-    Start-Sleep -Seconds 2
-    Move-Item -Path $new -Destination $dest -Force
-}}
+# Rename current -> .old, then pending -> current (keeps shortcut target valid)
+if (Test-Path $old) {{ Remove-Item $old -Force }}
+Rename-Item -Path $current -NewName ($current + ".old") -Force
+Rename-Item -Path $pending -NewName $current -Force
 
-# Relaunch
-Start-Process -FilePath $dest
+# Relaunch from the original path — shortcut still works
+Start-Process -FilePath $current
+
+# Tidy up this script
+Remove-Item -Path $MyInvocation.MyCommand.Path -Force
 """
-        with open(ps_path, "w") as f:
+        with open(ps_path, "w", encoding="utf-8") as f:
             f.write(ps)
 
         self._status_label.config(text="Applying update — relaunching...", fg=MUTED)
 
-        # CREATE_NO_WINDOW keeps PowerShell alive without a visible console.
-        # DETACHED_PROCESS kills PowerShell immediately so must not be used.
         CREATE_NO_WINDOW = 0x08000000
         subprocess.Popen(
             [
@@ -635,8 +641,8 @@ Start-Process -FilePath $dest
             close_fds=True,
         )
 
-        # Hard-exit: os._exit bypasses Python cleanup and calls ExitProcess()
-        # directly, guaranteeing Windows releases the exe file handle immediately.
+        # Hard-exit: bypasses Python cleanup and calls ExitProcess() directly,
+        # releasing the exe file handle so PowerShell can rename it.
         self.root.after(300, lambda: os._exit(0))
 
     def _up_to_date(self):
