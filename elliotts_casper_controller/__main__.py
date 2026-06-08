@@ -17,6 +17,14 @@ if getattr(sys, "frozen", False) and sys.platform == "win32":
     import asyncio
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+    # Clean up any leftover .old exe from a previous auto-update
+    try:
+        old_exe = sys.executable + ".old"
+        if os.path.exists(old_exe):
+            os.remove(old_exe)
+    except Exception:
+        pass
+
 from elliotts_casper_controller.gui_launcher import main
 
 if __name__ == "__main__":

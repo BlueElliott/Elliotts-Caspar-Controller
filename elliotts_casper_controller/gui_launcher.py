@@ -553,10 +553,8 @@ class CasparControllerGUI:
         self._disable_btn(self._btn_update, "Downloading...")
         self._status_label.config(text=f"Downloading v{latest}...", fg=MUTED)
 
-        current_exe = sys.executable
         tmp_dir = tempfile.mkdtemp()
         new_exe = os.path.join(tmp_dir, "update.exe")
-        bat_path = os.path.join(tmp_dir, "update.bat")
 
         def download():
             try:
@@ -575,30 +573,7 @@ class CasparControllerGUI:
                                 self.root.after(0, lambda p=pct: self._disable_btn(
                                     self._btn_update, f"Downloading {p}%..."))
 
-                pid = os.getpid()
-                # Write a bat script: wait for this process to exit, swap exe, relaunch
-                bat = f"""@echo off
-:wait
-tasklist /fi "PID eq {pid}" /fo csv 2>nul | find /i "{pid}" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto wait
-)
-rem Give Windows a moment to fully release the file lock
-timeout /t 2 /nobreak >nul
-move /y "{new_exe}" "{current_exe}"
-if errorlevel 1 (
-    echo Move failed, retrying...
-    timeout /t 2 /nobreak >nul
-    move /y "{new_exe}" "{current_exe}"
-)
-start "" "{current_exe}"
-del "%~f0"
-"""
-                with open(bat_path, "w") as f:
-                    f.write(bat)
-
-                self.root.after(0, self._apply_update, bat_path)
+                self.root.after(0, lambda: self._apply_update(new_exe))
 
             except Exception as e:
                 self.root.after(0, lambda: self._update_error(f"Download failed: {e}"))
@@ -607,18 +582,42 @@ del "%~f0"
 
         threading.Thread(target=download, daemon=True).start()
 
-    def _apply_update(self, bat_path: str):
+    def _apply_update(self, new_exe: str):
+        import shutil
         import subprocess
+
+        current_exe = sys.executable
+        old_exe = current_exe + ".old"
+
         self._status_label.config(text="Applying update — relaunching...", fg=MUTED)
-        # Launch the bat detached so it survives this process exiting
+        try:
+            # On Windows you can rename a running exe (held by handle, not path).
+            # Remove any leftover .old from a previous update first.
+            if os.path.exists(old_exe):
+                os.remove(old_exe)
+            os.rename(current_exe, old_exe)   # rename running exe — always works
+            shutil.move(new_exe, current_exe) # place new exe at original path
+        except Exception as e:
+            # Rollback if anything went wrong
+            try:
+                if not os.path.exists(current_exe) and os.path.exists(old_exe):
+                    os.rename(old_exe, current_exe)
+            except Exception:
+                pass
+            messagebox.showerror("Update Failed",
+                                 f"Could not replace the executable:\n{e}\n\n"
+                                 "The app has not been changed.",
+                                 parent=self.root)
+            self._enable_btn(self._btn_update, self._do_auto_update,
+                             f"Install v{getattr(self, '_pending_latest', '?')}", BTN_ORNG)
+            return
+
+        # Launch the new exe detached, then hard-exit so Windows releases all handles
         subprocess.Popen(
-            ["cmd.exe", "/c", bat_path],
+            [current_exe],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-            close_fds=True,
         )
-        # Use _quit() so uvicorn stops and sys.exit(0) fires — fully releasing
-        # the exe file lock so the bat script can overwrite it
-        self.root.after(500, self._quit)
+        os._exit(0)
 
     def _up_to_date(self):
         self._redraw_btn(self._btn_update, "Up to Date ✓", SUCCESS, tk.NORMAL)
