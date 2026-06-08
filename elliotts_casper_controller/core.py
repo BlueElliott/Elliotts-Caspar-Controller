@@ -336,6 +336,24 @@ def static_file(filename: str):
     raise HTTPException(status_code=404)
 
 
+@app.get("/test/{hex_colour}", response_class=HTMLResponse)
+def test_pattern(hex_colour: str):
+    """Serve a solid-colour page for CasparCG HTML producer test patterns.
+
+    hex_colour should be RRGGBBAA (e.g. FF0000FF for opaque red).
+    The alpha byte is used as CSS opacity so the fill is always opaque to the compositor.
+    """
+    import re
+    if not re.fullmatch(r"[0-9A-Fa-f]{6,8}", hex_colour):
+        raise HTTPException(status_code=400, detail="hex must be 6 or 8 hex chars")
+    css_hex = "#" + hex_colour[:6]
+    return HTMLResponse(
+        f'<!DOCTYPE html><html><head><meta charset="UTF-8">'
+        f'<style>*{{margin:0;padding:0}}html,body{{width:100%;height:100%;background:{css_hex}}}</style>'
+        f'</head><body></body></html>'
+    )
+
+
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
@@ -665,6 +683,8 @@ def api_log():
 
 @app.get("/", response_class=HTMLResponse)
 def page_dashboard():
+    cfg = load_config()
+    web_port = cfg.get("web_port", 5280)
     body = """
 <div id="setup-banner" style="display:none;background:rgba(245,158,11,0.12);border:2px solid var(--warning);border-radius:12px;padding:20px 24px;margin-bottom:16px">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
@@ -702,12 +722,12 @@ let lastRunning = null;
 let _mediaClips = [];
 
 const TEST_PATTERNS = [
-  { label: 'Black',  cmd: 'PLAY 1-0 #000000FF' },
-  { label: 'White',  cmd: 'PLAY 1-0 #FFFFFFFF' },
-  { label: 'Red',    cmd: 'PLAY 1-0 #FF0000FF' },
-  { label: 'Green',  cmd: 'PLAY 1-0 #00FF00FF' },
-  { label: 'Blue',   cmd: 'PLAY 1-0 #0000FFFF' },
-  { label: 'Grey',   cmd: 'PLAY 1-0 #808080FF' },
+  { label: 'Black',  cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/000000FF"' },
+  { label: 'White',  cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/FFFFFFFF"' },
+  { label: 'Red',    cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/FF0000FF"' },
+  { label: 'Green',  cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/00FF00FF"' },
+  { label: 'Blue',   cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/0000FFFF"' },
+  { label: 'Grey',   cmd: 'PLAY 1-1 [HTML] "http://127.0.0.1:WEB_PORT/test/808080FF"' },
 ];
 
 function _buildMediaOptions(clips, current) {
@@ -878,6 +898,7 @@ function sendAmcp(id) {
 updateStatus();
 setInterval(updateStatus, 4000);
 """
+    js = js.replace("WEB_PORT", str(web_port))
     return HTMLResponse(page("Dashboard", "dashboard", body, js))
 
 
