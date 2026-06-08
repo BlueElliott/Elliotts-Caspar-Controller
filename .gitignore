@@ -13,6 +13,7 @@ elliotts_casper_config.json
 casparcg.config
 log/
 media/
+!Lite Casper Server/media/
 data/
 template/
 .DS_Store
