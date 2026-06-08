@@ -19,3 +19,16 @@ template/
 .DS_Store
 Thumbs.db
 *.exe
+*.zip
+
+# Lite Casper Server binaries — too large for git, distribute via GitHub Release
+Lite Casper Server/*.dll
+Lite Casper Server/*.pak
+Lite Casper Server/*.dat
+Lite Casper Server/*.bin
+Lite Casper Server/*.node
+Lite Casper Server/*.ttf
+Lite Casper Server/locales/
+Lite Casper Server/prebuilds/
+Lite Casper Server/v8_context_snapshot.bin
+Lite Casper Server/icudtl.dat

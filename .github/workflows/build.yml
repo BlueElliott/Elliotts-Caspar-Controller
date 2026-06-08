@@ -58,11 +58,11 @@ jobs:
           cat version.txt
 
       - name: Build executable with PyInstaller
-        run: pyinstaller ElliottsCasperController.spec
+        run: pyinstaller ElliottsCasparController.spec
 
       - name: Verify executable exists
         run: |
-          $exePath = Get-ChildItem "dist\ElliottsCasperController-*.exe" | Select-Object -First 1
+          $exePath = Get-ChildItem "dist\ElliottsCasparController-*.exe" | Select-Object -First 1
           if ($exePath) {
             Write-Host "Executable built successfully: $($exePath.Name)"
             Get-Item $exePath | Format-List
@@ -76,7 +76,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-executable
-          path: dist/ElliottsCasperController-*.exe
+          path: dist/ElliottsCasparController-*.exe
           retention-days: 90
 
   # ==================== BUILD PYTHON PACKAGE ====================
@@ -174,7 +174,7 @@ jobs:
           PREV_TAG=$(git describe --abbrev=0 --tags ${{ github.ref_name }}^ 2>/dev/null || echo "")
 
           cat > release-notes.md << 'EOF'
-          ## Elliott's Casper Controller ${{ github.ref_name }}
+          ## Elliott's Caspar Controller ${{ github.ref_name }}
 
           Desktop app and web UI for managing multiple CasparCG NDI outputs from a single Windows machine.
 
@@ -182,13 +182,13 @@ jobs:
 
           | File | Description |
           |------|-------------|
-          | `ElliottsCasperController.exe` | The controller app — portable, no install, no Python required |
-          | `LiteCasperServer.zip` | CasparCG Server (lite build) — extract to a folder on your machine |
+          | `ElliottsCasparController.exe` | The controller app — portable, no install, no Python required |
+          | `LiteCasparServer.zip` | CasparCG Server (lite build) — extract to a folder on your machine |
 
           ### Quick Start
 
-          1. Extract `LiteCasperServer.zip` to a folder (e.g. `C:\CasparCG\`)
-          2. Run `ElliottsCasperController.exe`
+          1. Extract `LiteCasparServer.zip` to a folder (e.g. `C:\CasparCG\`)
+          2. Run `ElliottsCasparController.exe`
           3. Click **Open Web UI** (or go to `http://127.0.0.1:5280`)
           4. Go to **Settings** → set the path to `casparcg.exe` inside your extracted folder
           5. Add your output instances, click **Save & Regenerate Configs**, then **Start All**
@@ -215,7 +215,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/windows-executable/ElliottsCasperController-*.exe
+            artifacts/windows-executable/ElliottsCasparController-*.exe
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}

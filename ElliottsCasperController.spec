@@ -121,7 +121,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name=f'ElliottsCasperController-{VERSION}',
+    name=f'ElliottsCasparController-{VERSION}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

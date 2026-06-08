@@ -1,4 +1,4 @@
-"""Tkinter desktop launcher for Elliott's Casper Controller."""
+"""Tkinter desktop launcher for Elliott's Caspar Controller."""
 import logging
 import math
 import os
@@ -85,10 +85,10 @@ WARNING   = "#f59e0b"
 # Main GUI class
 # ---------------------------------------------------------------------------
 
-class CasperControllerGUI:
+class CasparControllerGUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title(f"Elliott's Casper Controller  v{__version__}")
+        self.root.title(f"Elliott's Caspar Controller  v{__version__}")
         self.root.resizable(False, True)
         self.root.minsize(750, 600)
         self.root.configure(bg=BG_DARK)
@@ -207,7 +207,7 @@ class CasperControllerGUI:
         top.pack_propagate(False)
         title_f = tk.Frame(top, bg=BG_DARK)
         title_f.pack(expand=True)
-        tk.Label(title_f, text="Elliott's Casper Controller",
+        tk.Label(title_f, text="Elliott's Caspar Controller",
                  font=self.font_bold24, bg=BG_DARK, fg=TEXT).pack()
         tk.Label(title_f, text=f"Version {__version__}",
                  font=self.font_reg, bg=BG_DARK, fg=MUTED).pack()
@@ -497,7 +497,7 @@ class CasperControllerGUI:
             try:
                 import requests as _req
                 url = "https://api.github.com/repos/BlueElliott/Elliotts-Casper-Controller/releases/latest"
-                r = _req.get(url, headers={"User-Agent": "ElliotsCasperController"}, timeout=8)
+                r = _req.get(url, headers={"User-Agent": "ElliotsCasparController"}, timeout=8)
                 data = r.json()
                 latest = data.get("tag_name", "").lstrip("v")
                 current = __version__
@@ -602,6 +602,64 @@ class CasperControllerGUI:
             except Exception as exc:
                 self._managers = {}
                 self._sync_api_managers()
+                self.root.after(0, lambda: self._on_caspar_failed(str(exc)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_remaining(self):
+        """Start only the instances that are not currently responding to AMCP ping.
+
+        Does NOT kill running instances — avoids disrupting live CEF sessions
+        and prevents the Chromium config-path popup on already-running instances.
+        """
+        exe = load_config().get("caspar_exe_path", "").strip()
+        if not os.path.isfile(exe):
+            messagebox.showerror("CasparCG Not Found",
+                                 f"Cannot find:\n{exe or '(no path set)'}\n\n"
+                                 "Go to Web UI → Settings to set the CasparCG executable path.",
+                                 parent=self.root)
+            return
+        self._disable_btn(self._btn_start, "Starting...")
+        self._status_label.config(text="Starting remaining instances...", fg=MUTED)
+
+        def run():
+            try:
+                cfg = load_config()
+                instances = cfg.get("instances", [])
+                started = []
+                errors = []
+                first = True
+                for i, inst in enumerate(instances):
+                    port = instance_amcp_port(cfg, inst)
+                    if AMCPClient(port=port).ping():
+                        continue  # already live — leave it alone
+                    if not first:
+                        time.sleep(5)
+                    first = False
+                    from elliotts_casper_controller.config_manager import regenerate_instance_config
+                    regenerate_instance_config(cfg, inst)
+                    m = CasparProcessManager(
+                        exe_path=exe,
+                        amcp_port=port,
+                        startup_delay=cfg.get("startup_delay", 60),
+                        window_title=f"PCR3 CasparCG — {inst['name']}",
+                        config_filename=f"casparcg_inst_{inst['id']}.config",
+                    )
+                    self._managers[inst["id"]] = m
+                    ok = m.start()
+                    if ok:
+                        res = self._send_instance_load(inst, AMCPClient(port=port))
+                        logger.info(f"Inst {inst['id']} ({inst['name']}) → {res[:60]}")
+                        started.append(inst["id"])
+                    else:
+                        logger.warning(f"Inst {inst['id']} ({inst['name']}) FAILED to start")
+                        errors.append(inst["id"])
+                self._sync_api_managers()
+                total = len(instances)
+                live = sum(1 for inst in instances
+                           if AMCPClient(port=instance_amcp_port(cfg, inst)).ping())
+                self.root.after(0, lambda s=live, t=total: self._on_caspar_started(s, t))
+            except Exception as exc:
                 self.root.after(0, lambda: self._on_caspar_failed(str(exc)))
 
         threading.Thread(target=run, daemon=True).start()
@@ -720,7 +778,7 @@ class CasperControllerGUI:
                     else:
                         remaining = tot - running_count
                         self.root.after(0, lambda r=remaining: self._enable_btn(
-                            self._btn_start, self._start_caspar, f"Start Remaining ({r})", BTN_GREEN))
+                            self._btn_start, self._start_remaining, f"Start Remaining ({r})", BTN_GREEN))
                     if not self._caspar_running:
                         self._caspar_running = True
                 elif self._caspar_running:
@@ -835,9 +893,9 @@ class CasperControllerGUI:
                 pystray.MenuItem("Quit",                 lambda: self._quit()),
             )
             self._tray_icon = pystray.Icon(
-                "ElliotsCasperController",
+                "ElliotsCasparController",
                 self._make_tray_image(),
-                "Elliott's Casper Controller",
+                "Elliott's Caspar Controller",
                 menu,
             )
             threading.Thread(target=self._tray_icon.run, daemon=True).start()
@@ -849,7 +907,7 @@ class CasperControllerGUI:
             self._tray_icon = None
 
     def _on_close(self):
-        if messagebox.askokcancel("Quit", "Quit Elliott's Casper Controller?\n\nThe web server will stop.",
+        if messagebox.askokcancel("Quit", "Quit Elliott's Caspar Controller?\n\nThe web server will stop.",
                                    parent=self.root):
             self._quit()
 
@@ -874,7 +932,7 @@ class CasperControllerGUI:
 # ---------------------------------------------------------------------------
 
 def launch():
-    app = CasperControllerGUI()
+    app = CasparControllerGUI()
     app.run()
 
 

@@ -1,4 +1,4 @@
-# Elliott's Casper Controller
+# Elliott's Caspar Controller
 
 > Desktop app and web UI for managing multiple CasparCG NDI outputs from a single Windows machine.
 
@@ -9,7 +9,7 @@
 
 ## What it does
 
-Elliott's Casper Controller launches and manages multiple CasparCG processes simultaneously — one per NDI output — from a single desktop GUI and web dashboard. Each instance gets its own AMCP port and NDI source name, so receivers (Tricasters, vMix, NDI Monitor, etc.) can independently subscribe to whichever outputs they need.
+Elliott's Caspar Controller launches and manages multiple CasparCG processes simultaneously — one per NDI output — from a single desktop GUI and web dashboard. Each instance gets its own AMCP port and NDI source name, so receivers (Tricasters, vMix, NDI Monitor, etc.) can independently subscribe to whichever outputs they need.
 
 It was built for live broadcast workflows where you need several named NDI graphics outputs running reliably from one Windows PC.
 
@@ -35,19 +35,19 @@ It was built for live broadcast workflows where you need several named NDI graph
 
 | File | What it is |
 |------|------------|
-| `ElliottsCasperController.exe` | The controller app |
-| `LiteCasperServer.zip` | CasparCG Server — pre-configured, ready to use |
+| `ElliottsCasparController.exe` | The controller app |
+| `LiteCasparServer.zip` | CasparCG Server — pre-configured, ready to use |
 
 ### 2. Set up CasparCG
 
-1. Extract `LiteCasperServer.zip` to a permanent folder on your machine, e.g. `C:\CasparCG\`
+1. Extract `LiteCasparServer.zip` to a permanent folder on your machine, e.g. `C:\CasparCG\`
 2. Inside you'll find `casparcg.exe` — this is what the controller launches
 
 > **NDI:** Make sure the [NDI Runtime](https://ndi.video/tools/) is installed on the machine so CasparCG can output NDI sources.
 
 ### 3. Run the controller
 
-1. Run `ElliottsCasperController.exe` — no installation needed, no Python required
+1. Run `ElliottsCasparController.exe` — no installation needed, no Python required
 2. The desktop launcher opens. Click **Open Web UI** (or go to `http://127.0.0.1:5280` in a browser)
 
 ### 4. Configure
@@ -116,7 +116,7 @@ The dashboard is accessible from any device on the network using the machine's I
 
 - Windows 10 / 11
 - [NDI Runtime](https://ndi.video/tools/) installed on the machine
-- `LiteCasperServer.zip` from the [Releases page](https://github.com/BlueElliott/Elliotts-Casper-Controller/releases) (includes CasparCG)
+- `LiteCasparServer.zip` from the [Releases page](https://github.com/BlueElliott/Elliotts-Casper-Controller/releases) (includes CasparCG)
 
 ### Running from source
 
@@ -150,8 +150,8 @@ Per-instance CasparCG configs (`casparcg_inst_N.config`) are auto-generated next
 
 ```bash
 pip install pyinstaller
-pyinstaller ElliottsCasperController.spec
-# Output: dist/ElliottsCasperController-X.X.X.exe
+pyinstaller ElliottsCasparController.spec
+# Output: dist/ElliottsCasparController-X.X.X.exe
 ```
 
 Releases are built automatically by GitHub Actions when a `v*.*.*` tag is pushed.
@@ -161,7 +161,7 @@ Releases are built automatically by GitHub Actions when a `v*.*.*` tag is pushed
 ## Architecture
 
 ```
-ElliottsCasperController.exe
+ElliottsCasparController.exe
 ├── Tkinter desktop window    (gui_launcher.py)
 ├── FastAPI web server         (core.py)            → http://0.0.0.0:<web-port>
 ├── AMCP TCP client            (amcp_client.py)     → localhost:<amcp-port>

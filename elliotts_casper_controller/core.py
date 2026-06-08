@@ -1,4 +1,4 @@
-"""FastAPI application — web UI and REST API for Elliott's Casper Controller."""
+"""FastAPI application — web UI and REST API for Elliott's Caspar Controller."""
 import threading
 import time
 import webbrowser
@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Elliott's Casper Controller", version=__version__, lifespan=lifespan)
+app = FastAPI(title="Elliott's Caspar Controller", version=__version__, lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +296,7 @@ def page(title: str, active: str, body: str, extra_js: str = "") -> str:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} — Elliott's Casper Controller</title>
+<title>{title} — Elliott's Caspar Controller</title>
 <style>{BASE_CSS}</style>
 </head>
 <body>
