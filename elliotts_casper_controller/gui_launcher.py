@@ -272,7 +272,7 @@ class CasparControllerGUI:
         # -- Controller uptime row --
         runtime_f = tk.Frame(content, bg=BG_DARK)
         runtime_f.pack(pady=(0, 6))
-        tk.Label(runtime_f, text="Controller:", font=self.font_reg,
+        tk.Label(runtime_f, text="Controller Uptime:", font=self.font_reg,
                  bg=BG_DARK, fg=MUTED).pack(side=tk.LEFT)
         self._runtime_label = tk.Label(runtime_f, text="—", font=self.font_reg,
                                         bg=BG_DARK, fg=MUTED)
