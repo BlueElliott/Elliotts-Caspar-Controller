@@ -10,24 +10,14 @@ def _config_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-_SINGULAR_BASE = (
-    "https://app.singular.live/output/66B4M4gG2cjcbEEP51ORwU/Output?aspect=16:9&g_custom1="
-)
-
 DEFAULT_CONFIG = {
-    "caspar_exe_path": "casparcg.exe",
+    "caspar_exe_path": "",
     "amcp_base_port": 5250,
     "web_port": 5280,
     "startup_delay": 60,
     "video_mode": "1080p2500",
     "autostart_caspar": False,
-    "instances": [
-        {"id": 1, "name": "GFX1",   "ndi_name": "PCR3 GFX1",   "type": "html", "url": _SINGULAR_BASE + "GFX1",   "startup_command": ""},
-        {"id": 2, "name": "GFX2",   "ndi_name": "PCR3 GFX2",   "type": "html", "url": _SINGULAR_BASE + "GFX2",   "startup_command": ""},
-        {"id": 3, "name": "GFX3",   "ndi_name": "PCR3 GFX3",   "type": "html", "url": _SINGULAR_BASE + "GFX3",   "startup_command": ""},
-        {"id": 4, "name": "GFX4",   "ndi_name": "PCR3 GFX4",   "type": "html", "url": _SINGULAR_BASE + "GFX4",   "startup_command": ""},
-        {"id": 5, "name": "GFXPVW", "ndi_name": "PCR3 GFXPVW", "type": "html", "url": _SINGULAR_BASE + "GFXPVW", "startup_command": ""},
-    ],
+    "instances": [],
 }
 
 
@@ -84,8 +74,7 @@ def load() -> dict:
     # Backfill top-level defaults
     config.setdefault("amcp_base_port", 5250)
     config.setdefault("autostart_caspar", False)
-    config.setdefault("instances", list(DEFAULT_CONFIG["instances"]))
-    # Upgrade old short startup_delay — anything ≤ 15 was the old "fixed wait" value
+    config.setdefault("instances", [])
     if config.get("startup_delay", 60) <= 15:
         config["startup_delay"] = 60
 

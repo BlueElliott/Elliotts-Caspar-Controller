@@ -168,11 +168,7 @@ jobs:
         with:
           path: artifacts/
 
-      - name: Display artifact structure
-        run: ls -R artifacts/
-
       - name: Generate release notes
-        id: notes
         run: |
           VERSION="${{ github.ref_name }}"
           PREV_TAG=$(git describe --abbrev=0 --tags ${{ github.ref_name }}^ 2>/dev/null || echo "")
@@ -180,27 +176,24 @@ jobs:
           cat > release-notes.md << 'EOF'
           ## Elliott's Casper Controller ${{ github.ref_name }}
 
-          Desktop application and web UI for managing CasparCG with NDI outputs and Singular.live graphics.
+          Desktop app and web UI for managing multiple CasparCG NDI outputs from a single Windows machine.
 
-          ### Download
+          ### Downloads
 
-          **Download:** `ElliottsCasperController.exe` (Portable)
-          - No installation needed - fully standalone
-          - No Python required
-
-          ### Features
-          - Launch and manage CasparCG server from a desktop GUI
-          - 5-channel NDI output with per-channel restart buttons
-          - Web-based multiviewer for all Singular.live outputs
-          - Settings page to edit NDI names, URLs, video mode, and CasparCG config
-          - System tray support
+          | File | Description |
+          |------|-------------|
+          | `ElliottsCasperController.exe` | The controller app — portable, no install, no Python required |
+          | `LiteCasperServer.zip` | CasparCG Server (lite build) — extract to a folder on your machine |
 
           ### Quick Start
 
-          1. Download `ElliottsCasperController.exe`
-          2. Run the executable
-          3. Click "Open Web Interface" or visit `http://localhost:5280`
-          4. Configure your CasparCG path and click Start
+          1. Extract `LiteCasperServer.zip` to a folder (e.g. `C:\CasparCG\`)
+          2. Run `ElliottsCasperController.exe`
+          3. Click **Open Web UI** (or go to `http://127.0.0.1:5280`)
+          4. Go to **Settings** → set the path to `casparcg.exe` inside your extracted folder
+          5. Add your output instances, click **Save & Regenerate Configs**, then **Start All**
+
+          See the [README](https://github.com/BlueElliott/Elliotts-Casper-Controller#readme) for full setup instructions.
 
           ### Changelog
           EOF
@@ -211,12 +204,10 @@ jobs:
             git log $PREV_TAG..${{ github.ref_name }} --pretty=format:"- %s (%h)" >> release-notes.md
           fi
 
-          cat >> release-notes.md << 'EOF'
-
-          ### Issues?
-
-          Report bugs at: https://github.com/BlueElliott/Elliotts-Casper-Controller/issues
-          EOF
+          echo "" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "---" >> release-notes.md
+          echo "Issues: https://github.com/BlueElliott/Elliotts-Casper-Controller/issues" >> release-notes.md
 
           cat release-notes.md
 

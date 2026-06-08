@@ -1,62 +1,124 @@
 # Elliott's Casper Controller
 
-> Desktop application and web UI for managing CasparCG with NDI outputs and Singular.live graphics
+> Desktop app and web UI for managing multiple CasparCG NDI outputs from a single Windows machine.
 
 [![Build Status](https://github.com/BlueElliott/Elliotts-Casper-Controller/actions/workflows/build.yml/badge.svg)](https://github.com/BlueElliott/Elliotts-Casper-Controller/actions)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A desktop launcher and web UI for starting CasparCG, managing 5 NDI output channels loaded with Singular.live HTML graphics, and monitoring everything from a browser-based dashboard and multiviewer.
+---
+
+## What it does
+
+Elliott's Casper Controller launches and manages multiple CasparCG processes simultaneously — one per NDI output — from a single desktop GUI and web dashboard. Each instance gets its own AMCP port and NDI source name, so receivers (Tricasters, vMix, NDI Monitor, etc.) can independently subscribe to whichever outputs they need.
+
+It was built for live broadcast workflows where you need several named NDI graphics outputs running reliably from one Windows PC.
 
 ---
 
 ## Features
 
-- **Desktop GUI** — Native Windows launcher with system tray, matching Elliott's Singular Controls visual style
-- **One-click CasparCG launch** — Starts CasparCG, writes `casparcg.config`, and loads all 5 channels automatically
-- **Named + coloured console** — CasparCG opens with a cyan-on-black console titled "PCR3 CasparCG - NDI Server" and a custom icon, so it's easy to identify alongside other CasparCG instances
-- **Multi-instance safe** — Stop/restart only affects the instance we launched; other CasparCG instances on the same PC are untouched
-- **Per-channel restart buttons** — Recover a stuck NDI output without touching the others (desktop and web UI)
-- **Dual port card** — Web UI port and AMCP port both clickable to change
-- **Check for Updates** — Checks GitHub releases API, shows badge and links to release page
-- **Web Dashboard** — Live channel status, server controls, event log (polls every 4s)
-- **Multiviewer** — All 5 Singular.live outputs in one browser window with per-frame reload
-- **Settings page** — Set CasparCG exe path, import existing `casparcg.config`, edit NDI names/URLs/video mode/ports — auto-regenerates `casparcg.config` on save
-
----
-
-## NDI Outputs
-
-| Channel | NDI Name     | Singular.live Source |
-|---------|-------------|----------------------|
-| 1       | PCR3 GFX1   | `g_custom1=GFX1`    |
-| 2       | PCR3 GFX2   | `g_custom1=GFX2`    |
-| 3       | PCR3 GFX3   | `g_custom1=GFX3`    |
-| 4       | PCR3 GFX4   | `g_custom1=GFX4`    |
-| 5       | PCR3 GFXPVW | `g_custom1=GFXPVW`  |
-
-All outputs are 1080p 25fps by default. Change via Web UI → Settings → Video Mode.
+- **Desktop GUI** — Native Windows launcher with system tray, status indicator, and controller uptime
+- **Multi-instance CasparCG** — Each output is a separate CasparCG process with its own AMCP port and NDI name
+- **Sequential startup** — Instances start one at a time with a gap between them, so NDI receivers latch onto the correct source
+- **Web dashboard** — Live instance status, Start/Stop controls per instance, media clip picker, AMCP command input, event log
+- **HTTP clip loading** — External devices (hardware controllers, Companion, automation systems) can load clips via a simple HTTP GET
+- **HTTP Generator** — Built-in URL builder for generating and copying clip-load URLs
+- **Settings page** — Configure the CasparCG path, video mode, AMCP ports, and manage instances (add, remove, reorder) from the browser
+- **Check for Updates** — Checks GitHub releases and links directly to the latest version
+- **Auto-start** — Optionally launch CasparCG automatically when the app starts
 
 ---
 
 ## Quick Start
 
-### Windows Executable (Recommended)
+### 1. Download both files from the [Releases page](https://github.com/BlueElliott/Elliotts-Casper-Controller/releases)
 
-1. Download `ElliottsCasperController-vX.X.X.exe` from [Releases](https://github.com/BlueElliott/Elliotts-Casper-Controller/releases)
-2. Run the executable — no installation needed
-3. Go to **Web UI → Settings** and set the path to `casparcg.exe`
-4. Click **Start CasparCG** — all 5 channels load automatically
-5. NDI outputs appear as `PCR3 GFX1` through `PCR3 GFXPVW` on the network
+| File | What it is |
+|------|------------|
+| `ElliottsCasperController.exe` | The controller app |
+| `LiteCasperServer.zip` | CasparCG Server — pre-configured, ready to use |
 
-### Python (pip)
+### 2. Set up CasparCG
 
-```bash
-pip install elliotts-casper-controller
-python -m elliotts_casper_controller
+1. Extract `LiteCasperServer.zip` to a permanent folder on your machine, e.g. `C:\CasparCG\`
+2. Inside you'll find `casparcg.exe` — this is what the controller launches
+
+> **NDI:** Make sure the [NDI Runtime](https://ndi.video/tools/) is installed on the machine so CasparCG can output NDI sources.
+
+### 3. Run the controller
+
+1. Run `ElliottsCasperController.exe` — no installation needed, no Python required
+2. The desktop launcher opens. Click **Open Web UI** (or go to `http://127.0.0.1:5280` in a browser)
+
+### 4. Configure
+
+1. Go to **Settings** in the web UI
+2. Set the **path to casparcg.exe** (e.g. `C:\CasparCG\casparcg.exe`) and click **Save Path**
+3. Set your **Video Mode** (default: 1080p 25fps)
+4. Under **Instances**, click **+ Add Instance** for each NDI output you want:
+   - Give it a **Name** (used in the dashboard) and an **NDI Name** (how it appears on the network)
+   - Set the **Type**: `HTML5` for web-based graphics (e.g. Singular.live), `Media` for video clip playback
+   - For HTML5: enter the graphics URL. For Media: optionally enter a startup AMCP command
+5. Click **Save & Regenerate Configs**
+
+### 5. Start CasparCG
+
+Click **Start All** on the Dashboard (or **Start CasparCG** in the desktop launcher). The app will:
+
+1. Write a config file for each instance next to `casparcg.exe`
+2. Kill any existing CasparCG processes
+3. Launch each instance sequentially, waiting for AMCP to respond before moving to the next
+4. Send each instance its startup command (load URL or play clip)
+
+NDI sources will appear on the network named exactly as you configured them.
+
+---
+
+## HTTP Clip Loading
+
+Any device on the same network can trigger a clip load via HTTP GET — no special integration needed.
+
+```
+GET http://<controller-ip>:<web-port>/api/load?instance=<name>&clip=<clip-name>
+GET http://<controller-ip>:<web-port>/api/load?instance=<name>&clip=<clip-name>&loop=false
 ```
 
-### From Source
+Go to **HTTP Generator** in the web UI to build and copy these URLs without typing.
+
+Works from a web browser, `curl`, a Companion HTTP button, a touchscreen panel, or any automation system that can send HTTP GET requests.
+
+---
+
+## Web Interface
+
+| URL | Page |
+|-----|------|
+| `http://<ip>:<port>/` | Dashboard — server controls, instance cards, media picker, event log |
+| `http://<ip>:<port>/http-generator` | HTTP URL Generator |
+| `http://<ip>:<port>/settings` | Settings — exe path, video mode, ports, instance editor |
+
+Default web port is `5280`. Change it via the port card in the desktop launcher or in Settings.
+
+The dashboard is accessible from any device on the network using the machine's IP address.
+
+---
+
+## Instance Types
+
+| Type | What it does |
+|------|-------------|
+| `HTML5` | Sends `PLAY 1-1 [url]` to load a web graphics page (e.g. Singular.live, Vizrt Live, any URL) |
+| `Media` | Sends a custom AMCP startup command, or `CLEAR 1` if left blank. Exposes a clip picker on the dashboard. |
+
+---
+
+## Requirements
+
+- Windows 10 / 11
+- [NDI Runtime](https://ndi.video/tools/) installed on the machine
+- `LiteCasperServer.zip` from the [Releases page](https://github.com/BlueElliott/Elliotts-Casper-Controller/releases) (includes CasparCG)
+
+### Running from source
 
 ```bash
 git clone https://github.com/BlueElliott/Elliotts-Casper-Controller.git
@@ -65,55 +127,26 @@ pip install -r requirements.txt
 python -m elliotts_casper_controller
 ```
 
----
+Python 3.8+ required.
 
-## Requirements
+### PyPI
 
-- Windows 10 / 11
-- [CasparCG Server 2.3+](https://github.com/CasparCG/server/releases) with NDI support
-- [NDI Tools](https://ndi.video/tools/) installed on the machine
-- Python 3.8+ (if running from source)
-
----
-
-## Configuration
-
-Settings are stored in `elliotts_casper_config.json` next to the exe (or project root when running from source). Do not edit `casparcg.config` manually — it is auto-generated by the app each time CasparCG is started.
-
-### Importing an existing casparcg.config
-
-Go to **Web UI → Settings → Import Existing casparcg.config**, enter the path to your existing config file and click **Import Config**. This pulls in the video mode, AMCP port, and NDI output names.
-
----
-
-## Web Interface
-
-| URL | Page |
-|-----|------|
-| `http://localhost:5280/` | Dashboard — server controls, channel status, restart buttons, event log |
-| `http://localhost:5280/multiviewer` | Multiviewer — all 5 outputs in one view |
-| `http://localhost:5280/settings` | Settings — exe path, import config, output settings, channel editor |
-
-Default web port is `5280`. Change via the port card in the desktop launcher or Web UI → Settings.
-
----
-
-## Architecture
-
-```
-ElliottsCasperController.exe
-├── Tkinter desktop window   (gui_launcher.py)
-├── FastAPI web server        (core.py)          → http://localhost:5280
-├── AMCP TCP client           (amcp_client.py)   → localhost:5250
-├── CasparCG process manager  (process_manager.py)
-└── Config manager            (config_manager.py) → elliotts_casper_config.json
+```bash
+pip install elliotts-casper-controller
+python -m elliotts_casper_controller
 ```
 
-The web server runs on a background thread inside the same process as the desktop GUI. All web API calls communicate with the same config and process state.
+---
+
+## Configuration file
+
+Settings are saved to `elliotts_casper_config.json` next to the exe (or project root when running from source). You can edit this file directly, but it's easier to use the Settings page.
+
+Per-instance CasparCG configs (`casparcg_inst_N.config`) are auto-generated next to `casparcg.exe` each time CasparCG is started. Do not edit these manually — they will be overwritten.
 
 ---
 
-## Building the Executable
+## Building the executable
 
 ```bash
 pip install pyinstaller
@@ -125,10 +158,25 @@ Releases are built automatically by GitHub Actions when a `v*.*.*` tag is pushed
 
 ---
 
-## Known Limitations
+## Architecture
 
-- **Console title** — CasparCG resets its console title at startup. The app uses `AttachConsole` + `SetConsoleTitleW` to set it back every second, and sets a custom icon on the console window for permanent visual identification. The title may briefly show CasparCG's own version string on first launch.
-- **Windows only** — The desktop launcher and process management use Windows-specific APIs.
+```
+ElliottsCasperController.exe
+├── Tkinter desktop window    (gui_launcher.py)
+├── FastAPI web server         (core.py)            → http://0.0.0.0:<web-port>
+├── AMCP TCP client            (amcp_client.py)     → localhost:<amcp-port>
+├── CasparCG process manager   (process_manager.py)
+└── Config manager             (config_manager.py)  → elliotts_casper_config.json
+```
+
+Each CasparCG instance is launched as a separate process with `CREATE_NEW_CONSOLE` so they get independent console windows. The web server and desktop GUI share process state via in-place dict mutation (`_sync_api_managers`).
+
+---
+
+## Known limitations
+
+- **Windows only** — The process management and console handling use Windows-specific APIs.
+- **NDI receiver sequencing** — If you start all instances simultaneously, some receivers may latch onto the wrong NDI source. The app starts instances sequentially with a 5-second gap to avoid this. Do not bypass this by starting instances manually in parallel.
 
 ---
 

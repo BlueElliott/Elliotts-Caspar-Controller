@@ -379,7 +379,8 @@ def api_status():
             "status": "live" if running else "stopped",
         })
     any_running = any(i["status"] == "live" for i in instances_out)
-    return {"running": any_running, "version": __version__, "instances": instances_out}
+    needs_setup = not cfg.get("caspar_exe_path") or not instances
+    return {"running": any_running, "version": __version__, "instances": instances_out, "needs_setup": needs_setup}
 
 
 @app.post("/api/server/start")
@@ -557,94 +558,6 @@ def api_instance_amcp(inst_id: int, req: AMCPCommandRequest):
     return {"ok": True, "response": res}
 
 
-@app.get("/api/instance/{inst_id}/stream")
-def api_instance_stream(inst_id: int):
-    """Live MJPEG stream of a CasparCG instance's NDI output via ndi-python."""
-    from fastapi.responses import StreamingResponse as _SR
-    try:
-        import NDIlib as ndi
-        import numpy as np
-    except ImportError:
-        raise HTTPException(
-            status_code=503,
-            detail="ndi-python not installed. Run: pip install ndi-python numpy"
-        )
-
-    cfg = load_config()
-    inst_map = {i["id"]: i for i in cfg.get("instances", [])}
-    if inst_id not in inst_map:
-        raise HTTPException(status_code=404, detail=f"Instance {inst_id} not found")
-    ndi_name = inst_map[inst_id].get("ndi_name", "")
-
-    def _generate():
-        from PIL import Image
-        import io as _io
-
-        if not ndi.initialize():
-            return
-
-        find = ndi.find_create_v2()
-        if not find:
-            ndi.destroy()
-            return
-
-        source = None
-        for _ in range(50):
-            ndi.find_wait_for_sources(find, 100)
-            for s in ndi.find_get_current_sources(find):
-                if ndi_name.lower() in s.ndi_name.lower():
-                    source = s
-                    break
-            if source:
-                break
-
-        if not source:
-            ndi.find_destroy(find)
-            ndi.destroy()
-            return
-
-        recv_create = ndi.RecvCreateV3()
-        recv_create.color_format = ndi.RECV_COLOR_FORMAT_RGBX_RGBA
-        recv_create.bandwidth = ndi.RECV_BANDWIDTH_HIGHEST
-        recv = ndi.recv_create_v3(recv_create)
-        if not recv:
-            ndi.find_destroy(find)
-            ndi.destroy()
-            return
-
-        ndi.recv_connect(recv, source)
-        ndi.find_destroy(find)
-
-        try:
-            while True:
-                t, v, a, m = ndi.recv_capture_v3(recv, 1000)
-                if t == ndi.FRAME_TYPE_VIDEO and v is not None:
-                    try:
-                        arr = np.copy(v.data)
-                        ndi.recv_free_video_v2(recv, v)
-                        img = Image.fromarray(arr[:, :, :3])
-                        buf = _io.BytesIO()
-                        img.save(buf, format="JPEG", quality=80)
-                        jpg = buf.getvalue()
-                        yield (b"--mjpegframe\r\n"
-                               b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n")
-                    except Exception:
-                        pass
-                elif t == ndi.FRAME_TYPE_AUDIO and a is not None:
-                    ndi.recv_free_audio_v2(recv, a)
-                elif t == ndi.FRAME_TYPE_METADATA and m is not None:
-                    ndi.recv_free_metadata(recv, m)
-        finally:
-            ndi.recv_destroy(recv)
-            ndi.destroy()
-
-    return _SR(
-        _generate(),
-        media_type="multipart/x-mixed-replace; boundary=mjpegframe",
-        headers={"Cache-Control": "no-cache, no-store"},
-    )
-
-
 @app.get("/api/load")
 def api_load_clip(instance: str, clip: str, loop: bool = True):
     """Load a clip into a named media instance via HTTP GET.
@@ -752,6 +665,17 @@ def api_log():
 @app.get("/", response_class=HTMLResponse)
 def page_dashboard():
     body = """
+<div id="setup-banner" style="display:none;background:rgba(245,158,11,0.12);border:2px solid var(--warning);border-radius:12px;padding:20px 24px;margin-bottom:16px">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+    <span style="font-size:22px">⚙</span>
+    <h2 style="color:var(--warning)">Setup Required</h2>
+  </div>
+  <p style="color:var(--muted);margin-bottom:12px">
+    CasparCG is not configured yet. Go to <strong style="color:var(--text)">Settings</strong> to set the path to <code>casparcg.exe</code> and add your output instances.
+  </p>
+  <a href="/settings" class="btn btn-warning">Go to Settings →</a>
+</div>
+
 <div class="card">
   <div class="card-header">
     <div style="display:flex;align-items:center">
@@ -850,6 +774,7 @@ function updateStatus() {
     const skipRender = _dropdownOpen;
 
     const running = data.running;
+    document.getElementById('setup-banner').style.display = data.needs_setup ? 'block' : 'none';
     document.getElementById('pulse').className = 'pulse ' + (running ? 'pulse-green' : 'pulse-red');
     const liveCount = data.instances.filter(i => i.status === 'live').length;
     const total = data.instances.length;
@@ -1100,8 +1025,16 @@ loadData();
 def page_settings():
     body = """
 <!-- CasparCG Executable -->
-<div class="card" style="margin-bottom:16px">
-  <h2 style="margin-bottom:16px">CasparCG Executable</h2>
+<div class="card" style="margin-bottom:16px" id="exe-card">
+  <h2 style="margin-bottom:4px">CasparCG Executable</h2>
+  <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+    Download CasparCG Server from
+    <a href="https://github.com/CasparCG/server/releases" target="_blank">github.com/CasparCG/server/releases</a>
+    and extract it, then point to the <code>casparcg.exe</code> inside.
+  </p>
+  <div id="exe-warning" style="display:none;background:rgba(245,158,11,0.12);border:1px solid var(--warning);border-radius:8px;padding:10px 14px;margin-bottom:12px;color:var(--warning);font-size:13px">
+    ⚠ CasparCG path is not set — the app cannot start CasparCG until this is configured.
+  </div>
   <div style="display:flex;gap:10px;align-items:flex-end">
     <div class="form-group" style="flex:1;margin:0">
       <label>Path to casparcg.exe</label>
@@ -1110,7 +1043,7 @@ def page_settings():
     <button class="btn btn-primary" onclick="saveExePath()" style="flex-shrink:0">Save Path</button>
   </div>
   <p style="color:var(--muted);font-size:12px;margin-top:8px">
-    Per-instance <code>casparcg_inst_N.config</code> files are written to the same folder as the exe when CasparCG is started.
+    Per-instance config files are written to the same folder as the exe when CasparCG is started.
   </p>
 </div>
 
@@ -1123,9 +1056,13 @@ def page_settings():
       <select id="video_mode">
         <option value="1080p2500">1080p 25fps</option>
         <option value="1080p5000">1080p 50fps</option>
+        <option value="1080p2997">1080p 29.97fps</option>
+        <option value="1080p3000">1080p 30fps</option>
+        <option value="1080p5994">1080p 59.94fps</option>
+        <option value="1080p6000">1080p 60fps</option>
         <option value="1080i5000">1080i 50i</option>
-        <option value="720p5000">720p 50fps</option>
-        <option value="720p2500">720p 25fps</option>
+        <option value="1080i5994">1080i 59.94i</option>
+        <option value="1080i6000">1080i 60i</option>
       </select>
     </div>
     <div class="form-group">
@@ -1174,7 +1111,9 @@ let currentInstances = [];
 
 function loadSettings() {
   api('/api/config').then(cfg => {
-    document.getElementById('caspar_exe_path').value = cfg.caspar_exe_path || '';
+    const exePath = cfg.caspar_exe_path || '';
+    document.getElementById('caspar_exe_path').value = exePath;
+    document.getElementById('exe-warning').style.display = exePath ? 'none' : 'block';
     document.getElementById('video_mode').value = cfg.video_mode || '1080p2500';
     document.getElementById('amcp_base_port').value = cfg.amcp_base_port || 5250;
     document.getElementById('web_port').value = cfg.web_port || 5280;
@@ -1307,7 +1246,10 @@ function deleteInstance(i) {
 function saveExePath() {
   const path = document.getElementById('caspar_exe_path').value.trim();
   api('/api/config', 'POST', { caspar_exe_path: path })
-    .then(() => toast('CasparCG path saved', 'success'))
+    .then(() => {
+      toast('CasparCG path saved', 'success');
+      document.getElementById('exe-warning').style.display = path ? 'none' : 'block';
+    })
     .catch(() => toast('Failed to save path', 'error'));
 }
 
