@@ -590,19 +590,8 @@ class CasparControllerGUI:
         exe_dir = os.path.dirname(current_exe)
         exe_name = os.path.basename(current_exe)
         old_exe = os.path.join(exe_dir, exe_name + ".old")
-        pid = os.getpid()
-
-        # Write swap.ps1 line-by-line using single-quoted PS strings.
-        # This avoids heredoc issues when paths contain apostrophes (e.g. Elliott's).
-        # Single-quote escape in PS: replace ' with ''
-        ps_path = os.path.join(exe_dir, "update.ps1")
-
-        # Capture the current extraction folder (_MEI...) so the swap script can
-        # delete it after the process exits. PyInstaller re-uses the same folder
-        # path for the same exe path — if the old _MEI folder is still present
-        # when the new exe launches, it may try to reuse stale content and fail
-        # to load python311.dll.
         meipass = getattr(sys, "_MEIPASS", "")
+        ps_path = os.path.join(exe_dir, "update.ps1")
 
         def ps_str(p: str) -> str:
             return "'" + p.replace("'", "''") + "'"
@@ -627,14 +616,12 @@ class CasparControllerGUI:
             "}",
             "if (-not $moved) { Remove-Item -Path $pending -Force -ErrorAction SilentlyContinue; exit 1 }",
             "",
-            # Step 2: delete the old _MEI extraction folder. Now that the exe has
-            # exited, its DLLs are unloaded and the folder can be deleted freely.
-            # This ensures the new exe always gets a clean fresh extraction.
+            # Step 2: delete the old _MEI folder so it can't interfere.
             "if ($meipass -and (Test-Path $meipass)) {",
             "    Remove-Item -Path $meipass -Recurse -Force -ErrorAction SilentlyContinue",
             "}",
             "",
-            # Step 3: unblock + move new exe into place, rollback on failure.
+            # Step 3: unblock + move new exe into place.
             "Unblock-File -Path $pending -ErrorAction SilentlyContinue",
             "try {",
             "    Move-Item -Path $pending -Destination $current -Force -ErrorAction Stop",
@@ -643,14 +630,11 @@ class CasparControllerGUI:
             "    exit 1",
             "}",
             "",
-            # Give Defender/SmartScreen time to scan the newly placed exe before
-            # we launch it. Then use Shell.Application.ShellExecute — the same
-            # API Explorer uses on double-click — so SmartScreen is handled
-            # gracefully rather than blocking PyInstaller's extraction mid-run.
-            "Start-Sleep -Seconds 5",
-            "$shell = New-Object -ComObject 'Shell.Application'",
-            "$dir   = [System.IO.Path]::GetDirectoryName($current)",
-            "$shell.ShellExecute($current, '', $dir, 'open', 1)",
+            # Step 4: clean up .old and script — no auto-relaunch.
+            # Windows Defender scans newly-placed exes on first execution and
+            # blocks PyInstaller's DLL extraction mid-run. The user relaunches
+            # from their shortcut (Explorer/ShellExecute) which handles the
+            # first-run check before the process starts.
             "$dlDeadline = (Get-Date).AddSeconds(15)",
             "while ((Test-Path $old) -and (Get-Date) -lt $dlDeadline) {",
             "    try { Remove-Item -Path $old -Force -ErrorAction Stop; break }",
@@ -661,7 +645,7 @@ class CasparControllerGUI:
         with open(ps_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
 
-        self._status_label.config(text="Applying update — relaunching...", fg=MUTED)
+        self._status_label.config(text="Update downloaded — close and reopen the app to finish.", fg=MUTED)
 
         CREATE_NO_WINDOW = 0x08000000
         subprocess.Popen(
@@ -673,10 +657,17 @@ class CasparControllerGUI:
             close_fds=True,
         )
 
-        # Hard-exit: bypasses Python cleanup and calls ExitProcess() directly,
-        # releasing the exe file handle so PowerShell can rename it.
-        # 1500ms gives PowerShell time to fully start before we vanish.
-        self.root.after(1500, lambda: os._exit(0))
+        # Show a clear message then close. The swap script runs in the background
+        # and completes after this process exits.
+        self.root.after(200, lambda: self._prompt_relaunch())
+
+    def _prompt_relaunch(self):
+        messagebox.showinfo(
+            "Update Ready",
+            "The update has been downloaded and will be applied when the app closes.\n\n"
+            "Please reopen the app from your shortcut or taskbar after it closes.",
+        )
+        self._quit()
 
     def _up_to_date(self):
         self._redraw_btn(self._btn_update, "Up to Date ✓", SUCCESS, tk.NORMAL)
