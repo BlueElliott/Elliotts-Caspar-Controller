@@ -62,9 +62,9 @@ jobs:
 
       - name: Verify executable exists
         run: |
-          $exePath = Get-ChildItem "dist\ElliottsCasparController-*.exe" | Select-Object -First 1
-          if ($exePath) {
-            Write-Host "Executable built successfully: $($exePath.Name)"
+          $exePath = "dist\ElliottsCasparController.exe"
+          if (Test-Path $exePath) {
+            Write-Host "Executable built successfully: ElliottsCasparController.exe"
             Get-Item $exePath | Format-List
           } else {
             Write-Error "Executable not found!"
@@ -76,7 +76,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-executable
-          path: dist/ElliottsCasparController-*.exe
+          path: dist/ElliottsCasparController.exe
           retention-days: 90
 
   # ==================== BUILD PYTHON PACKAGE ====================
@@ -215,7 +215,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/windows-executable/ElliottsCasparController-*.exe
+            artifacts/windows-executable/ElliottsCasparController.exe
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
