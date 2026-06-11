@@ -389,8 +389,16 @@ class CasparControllerGUI:
 
     @staticmethod
     def _fmt_elapsed(seconds: int) -> str:
-        h, rem = divmod(seconds, 3600)
+        d, rem = divmod(seconds, 86400)
+        h, rem = divmod(rem, 3600)
         m, s = divmod(rem, 60)
+        if seconds >= 7 * 86400:           # 7+ days → weeks + days
+            w, d2 = divmod(d, 7)
+            return f"{w}w {d2}d {h}h {m}m"
+        if seconds >= 4 * 3600:            # 4+ hours → days + hours + minutes
+            if d:
+                return f"{d}d {h}h {m}m"
+            return f"{h}h {m}m"
         if h:
             return f"{h}h {m}m {s}s"
         if m:
@@ -645,7 +653,14 @@ class CasparControllerGUI:
         with open(ps_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
 
-        self._status_label.config(text="Update downloaded — close and reopen the app to finish.", fg=MUTED)
+        messagebox.showinfo(
+            "Update Ready — Manual Restart Required",
+            "The update has been downloaded.\n\n"
+            "The app will now close to apply it.\n"
+            "Please reopen it from your shortcut or taskbar.",
+        )
+
+        self._status_label.config(text="Applying update…", fg=MUTED)
 
         CREATE_NO_WINDOW = 0x08000000
         subprocess.Popen(
@@ -657,17 +672,7 @@ class CasparControllerGUI:
             close_fds=True,
         )
 
-        # Show a clear message then close. The swap script runs in the background
-        # and completes after this process exits.
-        self.root.after(200, lambda: self._prompt_relaunch())
-
-    def _prompt_relaunch(self):
-        messagebox.showinfo(
-            "Update Ready",
-            "The update has been downloaded and will be applied when the app closes.\n\n"
-            "Please reopen the app from your shortcut or taskbar after it closes.",
-        )
-        self._quit()
+        self.root.after(500, self._quit)
 
     def _up_to_date(self):
         self._redraw_btn(self._btn_update, "Up to Date ✓", SUCCESS, tk.NORMAL)
