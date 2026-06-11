@@ -592,43 +592,40 @@ class CasparControllerGUI:
         old_exe = os.path.join(exe_dir, exe_name + ".old")
         pid = os.getpid()
 
-        # Write the swap script next to the exe so the path is guaranteed
-        # to have no permission issues. Use double-quoted PS strings to handle
-        # any apostrophes in the path (e.g. "Elliott's").
+        # Write swap.ps1 line-by-line using single-quoted PS strings.
+        # This avoids heredoc issues when paths contain apostrophes (e.g. Elliott's).
+        # Single-quote escape in PS: replace ' with ''
         ps_path = os.path.join(exe_dir, "update.ps1")
-        # Escape any double-quotes in paths (extremely unlikely but safe)
-        def psq(p):
-            return p.replace('"', '`"')
 
-        ps = f"""$pid_to_wait = {pid}
-$pending = "{psq(pending_exe)}"
-$current = "{psq(current_exe)}"
-$old     = "{psq(old_exe)}"
+        def ps_str(p: str) -> str:
+            return "'" + p.replace("'", "''") + "'"
 
-# Wait up to 60s for the app to fully exit
-$deadline = (Get-Date).AddSeconds(60)
-while ((Get-Date) -lt $deadline) {{
-    if (-not (Get-Process -Id $pid_to_wait -ErrorAction SilentlyContinue)) {{ break }}
-    Start-Sleep -Milliseconds 500
-}}
-
-# Extra pause so Windows fully releases the exe file handle
-Start-Sleep -Seconds 2
-
-# Move current -> .old, then pending -> current (keeps shortcut target valid)
-# Use Move-Item not Rename-Item — Rename-Item only accepts filenames not full paths
-if (Test-Path $old) {{ Remove-Item $old -Force }}
-Move-Item -Path $current -Destination $old -Force
-Move-Item -Path $pending -Destination $current -Force
-
-# Relaunch from the original path — shortcut still works
-Start-Process -FilePath $current
-
-# Tidy up this script
-Remove-Item -Path $MyInvocation.MyCommand.Path -Force
-"""
+        lines = [
+            f"$current = {ps_str(current_exe)}",
+            f"$pending = {ps_str(pending_exe)}",
+            f"$old     = {ps_str(old_exe)}",
+            "",
+            # Retry Move-Item until it succeeds — handles PyInstaller's two-process
+            # model (bootstrap + Python child) and any brief AV scan on exit.
+            # This is simpler than pre-checking file locks and more reliable.
+            "$deadline = (Get-Date).AddSeconds(60)",
+            "$moved = $false",
+            "while (-not $moved -and (Get-Date) -lt $deadline) {",
+            "    try {",
+            "        if (Test-Path $old) { Remove-Item $old -Force -ErrorAction Stop }",
+            "        Move-Item -Path $current -Destination $old -Force -ErrorAction Stop",
+            "        $moved = $true",
+            "    } catch {",
+            "        Start-Sleep -Milliseconds 500",
+            "    }",
+            "}",
+            "if (-not $moved) { exit 1 }",
+            "Move-Item -Path $pending -Destination $current -Force",
+            "Start-Process -FilePath $current",
+            "Remove-Item -Path $MyInvocation.MyCommand.Path -Force",
+        ]
         with open(ps_path, "w", encoding="utf-8") as f:
-            f.write(ps)
+            f.write("\n".join(lines))
 
         self._status_label.config(text="Applying update — relaunching...", fg=MUTED)
 
