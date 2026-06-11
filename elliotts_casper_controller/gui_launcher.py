@@ -643,8 +643,14 @@ class CasparControllerGUI:
             "    exit 1",
             "}",
             "",
-            "Start-Sleep -Seconds 2",
-            "Start-Process -FilePath $current",
+            # Give Defender/SmartScreen time to scan the newly placed exe before
+            # we launch it. Then use Shell.Application.ShellExecute — the same
+            # API Explorer uses on double-click — so SmartScreen is handled
+            # gracefully rather than blocking PyInstaller's extraction mid-run.
+            "Start-Sleep -Seconds 5",
+            "$shell = New-Object -ComObject 'Shell.Application'",
+            "$dir   = [System.IO.Path]::GetDirectoryName($current)",
+            "$shell.ShellExecute($current, '', $dir, 'open', 1)",
             "$dlDeadline = (Get-Date).AddSeconds(15)",
             "while ((Test-Path $old) -and (Get-Date) -lt $dlDeadline) {",
             "    try { Remove-Item -Path $old -Force -ErrorAction Stop; break }",
