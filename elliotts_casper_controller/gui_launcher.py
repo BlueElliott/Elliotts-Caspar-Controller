@@ -615,10 +615,11 @@ while ((Get-Date) -lt $deadline) {{
 # Extra pause so Windows fully releases the exe file handle
 Start-Sleep -Seconds 2
 
-# Rename current -> .old, then pending -> current (keeps shortcut target valid)
+# Move current -> .old, then pending -> current (keeps shortcut target valid)
+# Use Move-Item not Rename-Item — Rename-Item only accepts filenames not full paths
 if (Test-Path $old) {{ Remove-Item $old -Force }}
-Rename-Item -Path $current -NewName ($current + ".old") -Force
-Rename-Item -Path $pending -NewName $current -Force
+Move-Item -Path $current -Destination $old -Force
+Move-Item -Path $pending -Destination $current -Force
 
 # Relaunch from the original path — shortcut still works
 Start-Process -FilePath $current
