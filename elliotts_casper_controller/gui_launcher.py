@@ -605,9 +605,8 @@ class CasparControllerGUI:
             f"$pending = {ps_str(pending_exe)}",
             f"$old     = {ps_str(old_exe)}",
             "",
-            # Retry Move-Item until it succeeds — handles PyInstaller's two-process
-            # model (bootstrap + Python child) and any brief AV scan on exit.
-            # This is simpler than pre-checking file locks and more reliable.
+            # Step 1: retry moving current → old until the exe file is released.
+            # Handles PyInstaller's two-process model and any brief AV scan on exit.
             "$deadline = (Get-Date).AddSeconds(60)",
             "$moved = $false",
             "while (-not $moved -and (Get-Date) -lt $deadline) {",
@@ -619,10 +618,27 @@ class CasparControllerGUI:
             "        Start-Sleep -Milliseconds 500",
             "    }",
             "}",
-            "if (-not $moved) { exit 1 }",
-            "Move-Item -Path $pending -Destination $current -Force",
+            # If step 1 timed out, pending is still intact — nothing changed, exit cleanly.
+            "if (-not $moved) { Remove-Item -Path $pending -Force -ErrorAction SilentlyContinue; exit 1 }",
+            "",
+            # Step 2: put the new exe in place. If this fails, roll back so the
+            # user is left with a working app, not a broken folder.
+            "try {",
+            "    Move-Item -Path $pending -Destination $current -Force -ErrorAction Stop",
+            "} catch {",
+            "    Move-Item -Path $old -Destination $current -Force -ErrorAction SilentlyContinue",
+            "    exit 1",
+            "}",
+            "",
+            # Relaunch first so the user isn't waiting on cleanup.
             "Start-Process -FilePath $current",
-            "Remove-Item -Path $MyInvocation.MyCommand.Path -Force",
+            # Retry deleting .old — AV may briefly scan the renamed exe.
+            "$dlDeadline = (Get-Date).AddSeconds(15)",
+            "while ((Test-Path $old) -and (Get-Date) -lt $dlDeadline) {",
+            "    try { Remove-Item -Path $old -Force -ErrorAction Stop; break }",
+            "    catch { Start-Sleep -Milliseconds 500 }",
+            "}",
+            "Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue",
         ]
         with open(ps_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
@@ -641,7 +657,8 @@ class CasparControllerGUI:
 
         # Hard-exit: bypasses Python cleanup and calls ExitProcess() directly,
         # releasing the exe file handle so PowerShell can rename it.
-        self.root.after(300, lambda: os._exit(0))
+        # 1500ms gives PowerShell time to fully start before we vanish.
+        self.root.after(1500, lambda: os._exit(0))
 
     def _up_to_date(self):
         self._redraw_btn(self._btn_update, "Up to Date ✓", SUCCESS, tk.NORMAL)
