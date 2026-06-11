@@ -621,8 +621,10 @@ class CasparControllerGUI:
             # If step 1 timed out, pending is still intact — nothing changed, exit cleanly.
             "if (-not $moved) { Remove-Item -Path $pending -Force -ErrorAction SilentlyContinue; exit 1 }",
             "",
-            # Step 2: put the new exe in place. If this fails, roll back so the
-            # user is left with a working app, not a broken folder.
+            # Step 2: unblock the downloaded exe (removes Windows Zone.Identifier /
+            # Internet-zone mark that causes PyInstaller DLL extraction to fail),
+            # then move it into place. Rollback if anything fails.
+            "Unblock-File -Path $pending -ErrorAction SilentlyContinue",
             "try {",
             "    Move-Item -Path $pending -Destination $current -Force -ErrorAction Stop",
             "} catch {",
@@ -630,7 +632,8 @@ class CasparControllerGUI:
             "    exit 1",
             "}",
             "",
-            # Relaunch first so the user isn't waiting on cleanup.
+            # Brief pause before relaunch so the OS has fully settled after the swap.
+            "Start-Sleep -Seconds 2",
             "Start-Process -FilePath $current",
             # Retry deleting .old — AV may briefly scan the renamed exe.
             "$dlDeadline = (Get-Date).AddSeconds(15)",
