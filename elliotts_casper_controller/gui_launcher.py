@@ -597,6 +597,13 @@ class CasparControllerGUI:
         # Single-quote escape in PS: replace ' with ''
         ps_path = os.path.join(exe_dir, "update.ps1")
 
+        # Capture the current extraction folder (_MEI...) so the swap script can
+        # delete it after the process exits. PyInstaller re-uses the same folder
+        # path for the same exe path — if the old _MEI folder is still present
+        # when the new exe launches, it may try to reuse stale content and fail
+        # to load python311.dll.
+        meipass = getattr(sys, "_MEIPASS", "")
+
         def ps_str(p: str) -> str:
             return "'" + p.replace("'", "''") + "'"
 
@@ -604,9 +611,9 @@ class CasparControllerGUI:
             f"$current = {ps_str(current_exe)}",
             f"$pending = {ps_str(pending_exe)}",
             f"$old     = {ps_str(old_exe)}",
+            f"$meipass = {ps_str(meipass)}",
             "",
             # Step 1: retry moving current → old until the exe file is released.
-            # Handles PyInstaller's two-process model and any brief AV scan on exit.
             "$deadline = (Get-Date).AddSeconds(60)",
             "$moved = $false",
             "while (-not $moved -and (Get-Date) -lt $deadline) {",
@@ -618,12 +625,16 @@ class CasparControllerGUI:
             "        Start-Sleep -Milliseconds 500",
             "    }",
             "}",
-            # If step 1 timed out, pending is still intact — nothing changed, exit cleanly.
             "if (-not $moved) { Remove-Item -Path $pending -Force -ErrorAction SilentlyContinue; exit 1 }",
             "",
-            # Step 2: unblock the downloaded exe (removes Windows Zone.Identifier /
-            # Internet-zone mark that causes PyInstaller DLL extraction to fail),
-            # then move it into place. Rollback if anything fails.
+            # Step 2: delete the old _MEI extraction folder. Now that the exe has
+            # exited, its DLLs are unloaded and the folder can be deleted freely.
+            # This ensures the new exe always gets a clean fresh extraction.
+            "if ($meipass -and (Test-Path $meipass)) {",
+            "    Remove-Item -Path $meipass -Recurse -Force -ErrorAction SilentlyContinue",
+            "}",
+            "",
+            # Step 3: unblock + move new exe into place, rollback on failure.
             "Unblock-File -Path $pending -ErrorAction SilentlyContinue",
             "try {",
             "    Move-Item -Path $pending -Destination $current -Force -ErrorAction Stop",
@@ -632,10 +643,8 @@ class CasparControllerGUI:
             "    exit 1",
             "}",
             "",
-            # Brief pause before relaunch so the OS has fully settled after the swap.
             "Start-Sleep -Seconds 2",
             "Start-Process -FilePath $current",
-            # Retry deleting .old — AV may briefly scan the renamed exe.
             "$dlDeadline = (Get-Date).AddSeconds(15)",
             "while ((Test-Path $old) -and (Get-Date) -lt $dlDeadline) {",
             "    try { Remove-Item -Path $old -Force -ErrorAction Stop; break }",

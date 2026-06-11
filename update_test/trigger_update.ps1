@@ -12,12 +12,24 @@ if (-not (Test-Path $pending)) { Write-Host 'TestApp_update.exe not found. Reset
 $procs = Get-Process -Name 'TestApp' -ErrorAction SilentlyContinue
 if (-not $procs) { Write-Host 'TestApp.exe is not running. Launch it first.' -ForegroundColor Red; Read-Host 'Press Enter'; exit 1 }
 
-Write-Host "TestApp running ($($procs.Count) process(es)). Launching swap..." -ForegroundColor Cyan
+Write-Host "TestApp running ($($procs.Count) process(es)). Looking up _MEIPASS..." -ForegroundColor Cyan
+
+# Find the _MEI extraction folder for the running TestApp.
+# PyInstaller extracts to %TEMP%\_MEI<n> — find any _MEI folder whose content
+# matches our exe (heuristic: look for python311.dll inside _MEI* folders).
+$meipass = ''
+$tempDir = [System.IO.Path]::GetTempPath()
+$meiDirs = Get-ChildItem $tempDir -Filter '_MEI*' -Directory -ErrorAction SilentlyContinue |
+           Where-Object { Test-Path (Join-Path $_.FullName 'python311.dll') } |
+           Sort-Object LastWriteTime -Descending
+if ($meiDirs) { $meipass = $meiDirs[0].FullName }
+Write-Host "  _MEIPASS: $(if ($meipass) { $meipass } else { '(none found)' })" -ForegroundColor Gray
 
 $lines = @(
     "`$current = '$($current -replace "'","''")'",
     "`$pending = '$($pending -replace "'","''")'",
     "`$old     = '$($old -replace "'","''")'",
+    "`$meipass = '$($meipass -replace "'","''")'",
     "",
     "# Step 1: retry moving current -> old until exe file is released",
     "`$deadline = (Get-Date).AddSeconds(60)",
@@ -33,8 +45,12 @@ $lines = @(
     "}",
     "if (-not `$moved) { Remove-Item -Path `$pending -Force -ErrorAction SilentlyContinue; exit 1 }",
     "",
-    "# Step 2: unblock downloaded exe (removes Zone.Identifier that causes",
-    "# PyInstaller DLL extraction to fail), then move into place; rollback on failure",
+    "# Step 2: delete old _MEI folder so new exe always gets a clean extraction",
+    "if (`$meipass -and (Test-Path `$meipass)) {",
+    "    Remove-Item -Path `$meipass -Recurse -Force -ErrorAction SilentlyContinue",
+    "}",
+    "",
+    "# Step 3: unblock + move new exe into place",
     "Unblock-File -Path `$pending -ErrorAction SilentlyContinue",
     "try {",
     "    Move-Item -Path `$pending -Destination `$current -Force -ErrorAction Stop",
@@ -43,7 +59,6 @@ $lines = @(
     "    exit 1",
     "}",
     "",
-    "# Brief pause then relaunch; retry-delete .old (AV may briefly hold it)",
     "Start-Sleep -Seconds 2",
     "Start-Process -FilePath `$current",
     "`$dlDeadline = (Get-Date).AddSeconds(15)",
