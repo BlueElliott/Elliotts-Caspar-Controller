@@ -1060,7 +1060,10 @@ class CasparControllerGUI:
         if self._tray_icon:
             self._tray_icon.stop()
         self.root.destroy()
-        sys.exit(0)
+        # os._exit bypasses PyInstaller's _MEI cleanup attempt, which would
+        # otherwise show "Failed to remove temporary directory" if AV or the
+        # Windows Search indexer still holds a handle on an extracted file.
+        os._exit(0)
 
     # -----------------------------------------------------------------------
     # Run
