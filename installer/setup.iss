@@ -129,8 +129,7 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ZipUrl, ZipPath, ExtractDir, ScriptPath, PSArgs: String;
-  ScriptFile: Integer;
+  ZipUrl, ZipPath, ExtractDir, ScriptPath, PSContent, PSArgs: String;
   ResultCode: Integer;
 begin
   if (CurStep = ssPostInstall) and IsComponentSelected('caspar') then
@@ -140,21 +139,18 @@ begin
     ExtractDir := FCasparInstallDir;
     ScriptPath := ExpandConstant('{tmp}\DownloadCaspar.ps1');
 
-    // Write a PowerShell script to a temp file to avoid inline escaping issues.
-    ScriptFile := FileCreate(ScriptPath);
-    if ScriptFile <> -1 then
-    begin
-      FileWrite(ScriptFile, '$url = ''' + ZipUrl + '''' + #13#10);
-      FileWrite(ScriptFile, '$zip = ''' + ZipPath + '''' + #13#10);
-      FileWrite(ScriptFile, '$out = ''' + ExtractDir + '''' + #13#10);
-      FileWrite(ScriptFile, 'try {' + #13#10);
-      FileWrite(ScriptFile, '  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing' + #13#10);
-      FileWrite(ScriptFile, '  New-Item -ItemType Directory -Force -Path $out | Out-Null' + #13#10);
-      FileWrite(ScriptFile, '  Expand-Archive -Path $zip -DestinationPath $out -Force' + #13#10);
-      FileWrite(ScriptFile, '  Remove-Item -Path $zip -Force -ErrorAction SilentlyContinue' + #13#10);
-      FileWrite(ScriptFile, '} catch { exit 1 }' + #13#10);
-      FileClose(ScriptFile);
-    end;
+    // Build and save a PS1 script to avoid inline quoting/escaping issues.
+    PSContent :=
+      '$url = ''' + ZipUrl + '''' + #13#10 +
+      '$zip = ''' + ZipPath + '''' + #13#10 +
+      '$out = ''' + ExtractDir + '''' + #13#10 +
+      'try {' + #13#10 +
+      '  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing' + #13#10 +
+      '  New-Item -ItemType Directory -Force -Path $out | Out-Null' + #13#10 +
+      '  Expand-Archive -Path $zip -DestinationPath $out -Force' + #13#10 +
+      '  Remove-Item -Path $zip -Force -ErrorAction SilentlyContinue' + #13#10 +
+      '} catch { exit 1 }' + #13#10;
+    SaveStringToFile(ScriptPath, PSContent, False);
 
     WizardForm.StatusLabel.Caption := 'Downloading Lite Caspar Server (~500 MB) -- please wait...';
     WizardForm.StatusLabel.Update;
