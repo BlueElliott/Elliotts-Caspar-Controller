@@ -192,6 +192,29 @@ jobs:
         with:
           path: artifacts/
 
+      - name: Carry forward LiteCasparServer.zip from latest release that has it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Walk back through recent releases until we find one with LiteCasparServer.zip
+          FOUND=""
+          for TAG in $(gh release list --repo ${{ github.repository }} --limit 20 --json tagName --jq '.[].tagName'); do
+            if [ "$TAG" = "${{ github.ref_name }}" ]; then
+              continue  # skip the release we're about to create
+            fi
+            if gh release view "$TAG" --repo ${{ github.repository }} --json assets \
+               --jq '.assets[].name' 2>/dev/null | grep -q "^LiteCasparServer.zip$"; then
+              echo "Found LiteCasparServer.zip in release $TAG — downloading..."
+              gh release download "$TAG" --repo ${{ github.repository }} \
+                --pattern "LiteCasparServer.zip" --dir artifacts/
+              FOUND="$TAG"
+              break
+            fi
+          done
+          if [ -z "$FOUND" ]; then
+            echo "No previous release has LiteCasparServer.zip — skipping (users can still download CasparCG separately)"
+          fi
+
       - name: Generate release notes
         run: |
           PREV_TAG=$(git describe --abbrev=0 --tags ${{ github.ref_name }}^ 2>/dev/null || echo "")
@@ -241,6 +264,7 @@ jobs:
         with:
           files: |
             artifacts/windows-installer/ElliottsCasparControllerSetup.exe
+            artifacts/LiteCasparServer.zip
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
