@@ -116,6 +116,7 @@ class CasparControllerGUI:
 
         self.root.after(100, self._fit_window_height)
         self.root.after(400, self._start_web_server)
+        self.root.after(3000, self._maybe_add_defender_exclusion)
         self._update_pulse()
         self._update_runtime()
         self._poll_caspar_status()
@@ -591,6 +592,96 @@ class CasparControllerGUI:
 
         threading.Thread(target=download, daemon=True).start()
 
+    # -----------------------------------------------------------------------
+    # Windows Defender exclusion
+    # -----------------------------------------------------------------------
+
+    def _maybe_add_defender_exclusion(self):
+        """On first launch, offer to add the app folder to Defender exclusions.
+
+        This is a one-time UAC prompt. Once approved, Defender no longer scans
+        newly-placed exes in the folder, enabling fully automatic update
+        relaunching without DLL extraction failures.
+        """
+        if not getattr(sys, "frozen", False):
+            return  # dev mode — skip
+        cfg = load_config()
+        if cfg.get("defender_exclusion_added"):
+            return  # already done
+
+        exe_dir = os.path.dirname(sys.executable)
+
+        # Check if Defender is even running and if the folder is already excluded
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["powershell", "-NonInteractive", "-Command",
+                 f"(Get-MpPreference).ExclusionPath -contains '{exe_dir}'"],
+                capture_output=True, text=True, timeout=8,
+            )
+            if result.stdout.strip().lower() == "true":
+                # Already excluded (added manually or by a previous install)
+                cfg["defender_exclusion_added"] = True
+                save_config(cfg)
+                return
+        except Exception:
+            return  # Defender not present or query failed — skip silently
+
+        answer = messagebox.askyesno(
+            "Allow Automatic Updates",
+            "Add this app's folder to Windows Defender exclusions?\n\n"
+            "This is a one-time step that lets updates install and relaunch "
+            "automatically without Defender interfering.\n\n"
+            "You will be asked for admin approval.",
+            parent=self.root,
+        )
+        if not answer:
+            return
+
+        self._run_defender_exclusion(exe_dir)
+
+    def _run_defender_exclusion(self, exe_dir: str):
+        import subprocess
+
+        def ps_str(p: str) -> str:
+            return "'" + p.replace("'", "''") + "'"
+
+        # Launch an elevated PowerShell process to add the exclusion.
+        # Start-Process -Verb RunAs triggers the standard UAC prompt.
+        ps_cmd = f"Add-MpPreference -ExclusionPath {ps_str(exe_dir)}"
+        try:
+            proc = subprocess.run(
+                [
+                    "powershell.exe", "-NonInteractive", "-Command",
+                    f"Start-Process powershell -Verb RunAs -Wait "
+                    f"-ArgumentList '-NonInteractive -Command \"{ps_cmd}\"'",
+                ],
+                timeout=60,
+            )
+            if proc.returncode == 0:
+                cfg = load_config()
+                cfg["defender_exclusion_added"] = True
+                save_config(cfg)
+                messagebox.showinfo(
+                    "Exclusion Added",
+                    "Windows Defender exclusion added.\n\n"
+                    "Future updates will now install and relaunch automatically.",
+                    parent=self.root,
+                )
+            else:
+                messagebox.showwarning(
+                    "Exclusion Not Added",
+                    "The exclusion was not added (admin approval may have been declined).\n\n"
+                    "Updates will still work — you'll just need to reopen the app manually after each one.",
+                    parent=self.root,
+                )
+        except Exception as exc:
+            logger.warning(f"Defender exclusion failed: {exc}")
+
+    def _defender_excluded(self) -> bool:
+        cfg = load_config()
+        return bool(cfg.get("defender_exclusion_added"))
+
     def _apply_update(self, pending_exe: str):
         import subprocess
 
@@ -638,29 +729,42 @@ class CasparControllerGUI:
             "    exit 1",
             "}",
             "",
-            # Step 4: clean up .old and script — no auto-relaunch.
-            # Windows Defender scans newly-placed exes on first execution and
-            # blocks PyInstaller's DLL extraction mid-run. The user relaunches
-            # from their shortcut (Explorer/ShellExecute) which handles the
-            # first-run check before the process starts.
+            # Step 4: clean up .old, then relaunch if Defender exclusion is set,
+            # otherwise just clean up and let the user relaunch from their shortcut.
             "$dlDeadline = (Get-Date).AddSeconds(15)",
             "while ((Test-Path $old) -and (Get-Date) -lt $dlDeadline) {",
             "    try { Remove-Item -Path $old -Force -ErrorAction Stop; break }",
             "    catch { Start-Sleep -Milliseconds 500 }",
             "}",
+            # Auto-relaunch placeholder — replaced below based on exclusion state
+            "__RELAUNCH__",
             "Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue",
         ]
+
+        excluded = self._defender_excluded()
+        if excluded:
+            relaunch_line = (
+                "$shell = New-Object -ComObject 'Shell.Application'; "
+                "$shell.ShellExecute($current, '', "
+                "[System.IO.Path]::GetDirectoryName($current), 'open', 1)"
+            )
+        else:
+            relaunch_line = ""  # no relaunch — user opens from shortcut
+
+        script = "\n".join(lines).replace("__RELAUNCH__", relaunch_line)
         with open(ps_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+            f.write(script)
 
-        messagebox.showinfo(
-            "Update Ready — Manual Restart Required",
-            "The update has been downloaded.\n\n"
-            "The app will now close to apply it.\n"
-            "Please reopen it from your shortcut or taskbar.",
-        )
-
-        self._status_label.config(text="Applying update…", fg=MUTED)
+        if excluded:
+            self._status_label.config(text="Applying update — relaunching…", fg=MUTED)
+        else:
+            messagebox.showinfo(
+                "Update Ready — Manual Restart Required",
+                "The update has been downloaded.\n\n"
+                "The app will now close to apply it.\n"
+                "Please reopen it from your shortcut or taskbar.",
+            )
+            self._status_label.config(text="Applying update…", fg=MUTED)
 
         CREATE_NO_WINDOW = 0x08000000
         subprocess.Popen(
@@ -672,7 +776,7 @@ class CasparControllerGUI:
             close_fds=True,
         )
 
-        self.root.after(500, self._quit)
+        self.root.after(1500, lambda: os._exit(0))
 
     def _up_to_date(self):
         self._redraw_btn(self._btn_update, "Up to Date ✓", SUCCESS, tk.NORMAL)
