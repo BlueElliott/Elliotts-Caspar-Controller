@@ -1,9 +1,5 @@
-; Elliott's Caspar Controller — Inno Setup installer script
-; Build: iscc /DMyAppVersion="2.0.0" setup.iss
-;
-; The optional "Lite Caspar Server" component downloads LiteCasparServer.zip
-; from the matching GitHub release at install time.  Upload that zip to each
-; release manually (or add a CI step) and the installer will find it automatically.
+; Elliott's Caspar Controller -- Inno Setup installer script
+; Build: iscc /DMyAppVersion="2.0.2" setup.iss
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
@@ -14,15 +10,9 @@
 #define MyAppPublisher "BlueElliott"
 #define MyAppURL       "https://github.com/BlueElliott/Elliotts-Caspar-Controller"
 #define MyAppExeName   "ElliottsCasparController.exe"
-; Fixed GUID — must never change between versions so in-place upgrades work correctly.
-; Note: no braces here — they are added at the AppId line using {{ escape syntax.
+; Fixed GUID -- must never change between versions so in-place upgrades work correctly.
+; No braces in the #define -- they are added at AppId using {{ escape syntax.
 #define MyAppId "A3F7C2D1-8B4E-4F9A-B2C6-E1D8A3F7C2D1"
-
-; URL of the Lite Caspar Server zip on the matching GitHub release.
-#define LiteServerZipURL \
-  "https://github.com/BlueElliott/Elliotts-Caspar-Controller/releases/download/v" \
-  + MyAppVersion \
-  + "/LiteCasparServer.zip"
 
 [Setup]
 AppId={{{#MyAppId}}
@@ -32,7 +22,7 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-; User-local Programs — no admin rights needed.
+; User-local Programs -- no admin rights needed.
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
@@ -49,7 +39,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Setup
-; Close the running app silently during updates.
+; Close the running app silently during silent updates.
 CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
@@ -62,10 +52,9 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Components]
 Name: "main";   Description: "{#MyAppName}  (required)"; Types: full compact custom; Flags: fixed
-Name: "caspar"; Description: "Lite Caspar Server — CasparCG NDI engine  (recommended, ~500 MB download)"; Types: full
+Name: "caspar"; Description: "Lite Caspar Server -- CasparCG NDI engine (recommended, ~500 MB download)"; Types: full
 
 [Files]
-; ---- Main application (PyInstaller --onedir output) ----
 Source: "..\dist\{#MyAppSlug}\{#MyAppExeName}"; \
   DestDir: "{app}"; \
   Flags: ignoreversion; \
@@ -102,8 +91,8 @@ begin
     wpSelectComponents,
     'Lite Caspar Server Location',
     'Where should the Lite Caspar Server files be installed?',
-    'CasparCG and its CEF/NDI dependencies will be placed here (~500 MB). '
-    + 'Point the controller at casparcg.exe inside this folder after launch.',
+    'CasparCG and its dependencies will be placed here (~500 MB). ' +
+    'Point the controller at casparcg.exe inside this folder after launch.',
     False, ''
   );
   CasparDirPage.Add('');
@@ -140,27 +129,37 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ZipUrl, ZipPath, ExtractDir, PSArgs: String;
+  ZipUrl, ZipPath, ExtractDir, ScriptPath, PSArgs: String;
+  ScriptFile: Integer;
   ResultCode: Integer;
 begin
   if (CurStep = ssPostInstall) and IsComponentSelected('caspar') then
   begin
-    ZipUrl      := '{#LiteServerZipURL}';
-    ZipPath     := ExpandConstant('{tmp}\LiteCasparServer.zip');
-    ExtractDir  := FCasparInstallDir;
+    ZipUrl     := 'https://github.com/BlueElliott/Elliotts-Caspar-Controller/releases/download/v{#MyAppVersion}/LiteCasparServer.zip';
+    ZipPath    := ExpandConstant('{tmp}\LiteCasparServer.zip');
+    ExtractDir := FCasparInstallDir;
+    ScriptPath := ExpandConstant('{tmp}\DownloadCaspar.ps1');
 
-    WizardForm.StatusLabel.Caption :=
-      'Downloading Lite Caspar Server (~500 MB) — please wait...';
+    // Write a PowerShell script to a temp file to avoid inline escaping issues.
+    ScriptFile := FileCreate(ScriptPath);
+    if ScriptFile <> -1 then
+    begin
+      FileWrite(ScriptFile, '$url = ''' + ZipUrl + '''' + #13#10);
+      FileWrite(ScriptFile, '$zip = ''' + ZipPath + '''' + #13#10);
+      FileWrite(ScriptFile, '$out = ''' + ExtractDir + '''' + #13#10);
+      FileWrite(ScriptFile, 'try {' + #13#10);
+      FileWrite(ScriptFile, '  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing' + #13#10);
+      FileWrite(ScriptFile, '  New-Item -ItemType Directory -Force -Path $out | Out-Null' + #13#10);
+      FileWrite(ScriptFile, '  Expand-Archive -Path $zip -DestinationPath $out -Force' + #13#10);
+      FileWrite(ScriptFile, '  Remove-Item -Path $zip -Force -ErrorAction SilentlyContinue' + #13#10);
+      FileWrite(ScriptFile, '} catch { exit 1 }' + #13#10);
+      FileClose(ScriptFile);
+    end;
+
+    WizardForm.StatusLabel.Caption := 'Downloading Lite Caspar Server (~500 MB) -- please wait...';
     WizardForm.StatusLabel.Update;
 
-    PSArgs := Format(
-      '-NonInteractive -ExecutionPolicy Bypass -Command ' +
-      '"try { Invoke-WebRequest -Uri ''%s'' -OutFile ''%s'' -UseBasicParsing; ' +
-      'New-Item -ItemType Directory -Force -Path ''%s'' | Out-Null; ' +
-      'Expand-Archive -Path ''%s'' -DestinationPath ''%s'' -Force } ' +
-      'catch { exit 1 }"',
-      [ZipUrl, ZipPath, ExtractDir, ZipPath, ExtractDir]
-    );
+    PSArgs := '-NonInteractive -ExecutionPolicy Bypass -File "' + ScriptPath + '"';
 
     if not Exec('powershell.exe', PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or
        (ResultCode <> 0) then
@@ -174,7 +173,8 @@ begin
       );
     end;
 
-    ; Clean up temp zip regardless of result
+    // Clean up temp files
+    DeleteFile(ScriptPath);
     DeleteFile(ZipPath);
   end;
 end;
