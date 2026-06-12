@@ -100,7 +100,7 @@ def save(config: dict) -> None:
 
 def caspar_instance_config_path(config: dict, inst: dict) -> str:
     """Return the full path for a per-instance casparcg config file."""
-    filename = f"casparcg_inst_{inst['id']}.config"
+    filename = f"casparcg_inst_{inst['id']}.cfg"
     exe = config.get("caspar_exe_path", "")
     if exe and os.path.isabs(exe):
         return os.path.join(os.path.dirname(exe), filename)

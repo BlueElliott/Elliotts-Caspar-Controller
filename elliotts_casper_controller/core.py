@@ -46,7 +46,7 @@ def _make_manager(inst: dict, cfg: dict) -> CasparProcessManager:
         amcp_port=port,
         startup_delay=cfg["startup_delay"],
         window_title=f"PCR3 CasparCG — {inst['name']}",
-        config_filename=f"casparcg_inst_{inst['id']}.config",
+        config_filename=f"casparcg_inst_{inst['id']}.cfg",
     )
 
 
