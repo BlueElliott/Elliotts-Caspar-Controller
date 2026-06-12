@@ -717,7 +717,7 @@ class CasparControllerGUI:
                         amcp_port=port,
                         startup_delay=cfg.get("startup_delay", 60),
                         window_title=f"PCR3 CasparCG — {inst['name']}",
-                        config_filename=f"casparcg_inst_{inst['id']}.cfg",
+                        config_filename=f"casparcg_inst_{inst['id']}.config",
                     )
                     self._managers[inst["id"]] = m
                     ok = m.start()
@@ -786,7 +786,7 @@ class CasparControllerGUI:
                         amcp_port=port,
                         startup_delay=cfg.get("startup_delay", 60),
                         window_title=f"PCR3 CasparCG — {inst['name']}",
-                        config_filename=f"casparcg_inst_{inst['id']}.cfg",
+                        config_filename=f"casparcg_inst_{inst['id']}.config",
                     )
                     self._managers[inst["id"]] = m
                     ok = m.start()
@@ -876,7 +876,7 @@ class CasparControllerGUI:
                     amcp_port=port,
                     startup_delay=cfg["startup_delay"],
                     window_title=f"PCR3 CasparCG — {inst['name']}",
-                    config_filename=f"casparcg_inst_{inst['id']}.cfg",
+                    config_filename=f"casparcg_inst_{inst['id']}.config",
                 )
                 if m.adopt_existing():
                     self._managers[inst["id"]] = m
@@ -966,7 +966,7 @@ class CasparControllerGUI:
                 amcp_port=port,
                 startup_delay=cfg["startup_delay"],
                 window_title=f"PCR3 CasparCG — {inst['name']}",
-                config_filename=f"casparcg_inst_{inst_id}.cfg",
+                config_filename=f"casparcg_inst_{inst_id}.config",
             )
             self._managers[inst_id] = m
             ok = m.start()
@@ -995,7 +995,7 @@ class CasparControllerGUI:
                     amcp_port=port,
                     startup_delay=cfg["startup_delay"],
                     window_title=f"PCR3 CasparCG — {inst['name']}",
-                    config_filename=f"casparcg_inst_{inst['id']}.cfg",
+                    config_filename=f"casparcg_inst_{inst['id']}.config",
                 )
                 self._managers[inst["id"]] = m
                 ok = m.start()
