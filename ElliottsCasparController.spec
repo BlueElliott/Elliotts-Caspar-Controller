@@ -4,9 +4,9 @@ import sys
 
 try:
     from PyInstaller.building.build_main import Analysis
-    from PyInstaller.building.api import EXE, PYZ
+    from PyInstaller.building.api import EXE, PYZ, COLLECT
 except ImportError:
-    from PyInstaller.building.api import Analysis, EXE, PYZ
+    from PyInstaller.building.api import Analysis, EXE, PYZ, COLLECT
 
 sys.path.insert(0, os.path.abspath('.'))
 try:
@@ -117,9 +117,6 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
     name='ElliottsCasparController',
     debug=False,
@@ -127,7 +124,6 @@ exe = EXE(
     strip=False,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -135,4 +131,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='static/esc_icon.ico',
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='ElliottsCasparController',
 )

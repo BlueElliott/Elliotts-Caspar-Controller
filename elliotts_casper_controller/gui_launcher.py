@@ -510,13 +510,14 @@ class CasparControllerGUI:
                 latest = data.get("tag_name", "").lstrip("v")
                 current = __version__
                 if latest and latest != current:
-                    # Find the .exe asset download URL
-                    exe_url = None
+                    # Look for the installer asset specifically.
+                    installer_url = None
                     for asset in data.get("assets", []):
-                        if asset.get("name", "").endswith(".exe"):
-                            exe_url = asset.get("browser_download_url")
+                        if asset.get("name", "").lower().endswith("setup.exe"):
+                            installer_url = asset.get("browser_download_url")
                             break
-                    self.root.after(0, lambda: self._update_available(latest, data.get("html_url", ""), exe_url))
+                    self.root.after(0, lambda: self._update_available(
+                        latest, data.get("html_url", ""), installer_url))
                 else:
                     if not silent:
                         self.root.after(0, self._up_to_date)
@@ -525,34 +526,33 @@ class CasparControllerGUI:
                     self.root.after(0, lambda: self._update_error(str(e)))
         threading.Thread(target=run, daemon=True).start()
 
-    def _update_available(self, latest: str, release_url: str, exe_url: str | None):
-        if exe_url and getattr(sys, "frozen", False):
-            # Running as a frozen exe — offer one-click auto-update
-            self._pending_exe_url = exe_url
+    def _update_available(self, latest: str, release_url: str, installer_url: str | None):
+        if installer_url and getattr(sys, "frozen", False):
+            # Running as installed exe — offer one-click silent update via installer.
+            self._pending_installer_url = installer_url
             self._pending_latest = latest
-            self._redraw_btn(self._btn_update, f"Install v{latest}", BTN_ORNG, tk.NORMAL)
             self._enable_btn(self._btn_update, self._do_auto_update,
                              f"Install v{latest}", BTN_ORNG)
         else:
-            # Running from source — open release page instead
-            self._redraw_btn(self._btn_update, f"v{latest} Available!", BTN_ORNG, tk.NORMAL)
+            # Running from source, or no installer asset found — open release page.
             self._enable_btn(self._btn_update, lambda: webbrowser.open(release_url),
                              f"v{latest} Available!", BTN_ORNG)
         self._status_label.config(text=f"Update available: v{latest}", fg=WARNING)
 
     def _do_auto_update(self):
         import requests as _req
+        import tempfile
 
-        exe_url = getattr(self, "_pending_exe_url", None)
+        installer_url = getattr(self, "_pending_installer_url", None)
         latest = getattr(self, "_pending_latest", "?")
-        if not exe_url:
+        if not installer_url:
             return
 
         confirmed = messagebox.askyesno(
             "Install Update",
             f"Download and install v{latest} now?\n\n"
-            "The app will close to apply the update.\n"
-            "You will need to reopen it manually from your shortcut.",
+            "The app will close and the installer will run silently.\n"
+            "Reopen it from your shortcut when done.",
             parent=self.root,
         )
         if not confirmed:
@@ -561,19 +561,18 @@ class CasparControllerGUI:
         self._disable_btn(self._btn_update, "Downloading...")
         self._status_label.config(text=f"Downloading v{latest}...", fg=MUTED)
 
-        # Download into the same folder as the running exe so the swap script
-        # doesn't have to cross drives or deal with temp-folder permissions.
-        exe_dir = os.path.dirname(sys.executable)
-        pending_exe = os.path.join(exe_dir, "ElliottsCasparController_update.exe")
+        pending_installer = os.path.join(
+            tempfile.gettempdir(), "ElliottsCasparControllerSetup.exe"
+        )
 
         def download():
             try:
-                r = _req.get(exe_url, stream=True, timeout=60,
+                r = _req.get(installer_url, stream=True, timeout=120,
                              headers={"User-Agent": "ElliotsCasparController"})
                 r.raise_for_status()
                 total = int(r.headers.get("content-length", 0))
                 downloaded = 0
-                with open(pending_exe, "wb") as f:
+                with open(pending_installer, "wb") as f:
                     for chunk in r.iter_content(chunk_size=65536):
                         if chunk:
                             f.write(chunk)
@@ -583,7 +582,7 @@ class CasparControllerGUI:
                                 self.root.after(0, lambda p=pct: self._disable_btn(
                                     self._btn_update, f"Downloading {p}%..."))
 
-                self.root.after(0, lambda: self._apply_update(pending_exe))
+                self.root.after(0, lambda: self._apply_update(pending_installer))
 
             except Exception as e:
                 self.root.after(0, lambda: self._update_error(f"Download failed: {e}"))
@@ -592,73 +591,30 @@ class CasparControllerGUI:
 
         threading.Thread(target=download, daemon=True).start()
 
-    def _apply_update(self, pending_exe: str):
+    def _apply_update(self, installer_path: str):
         import subprocess
 
-        current_exe = sys.executable
-        exe_dir = os.path.dirname(current_exe)
-        exe_name = os.path.basename(current_exe)
-        old_exe = os.path.join(exe_dir, exe_name + ".old")
-        meipass = getattr(sys, "_MEIPASS", "")
-        ps_path = os.path.join(exe_dir, "update.ps1")
+        # Pass the current install directory so the silent installer overwrites
+        # in-place rather than defaulting to a fresh location.
+        install_dir = os.path.dirname(sys.executable)
 
-        def ps_str(p: str) -> str:
-            return "'" + p.replace("'", "''") + "'"
-
-        lines = [
-            f"$current = {ps_str(current_exe)}",
-            f"$pending = {ps_str(pending_exe)}",
-            f"$old     = {ps_str(old_exe)}",
-            f"$meipass = {ps_str(meipass)}",
-            "",
-            "$deadline = (Get-Date).AddSeconds(60)",
-            "$moved = $false",
-            "while (-not $moved -and (Get-Date) -lt $deadline) {",
-            "    try {",
-            "        if (Test-Path $old) { Remove-Item $old -Force -ErrorAction Stop }",
-            "        Move-Item -Path $current -Destination $old -Force -ErrorAction Stop",
-            "        $moved = $true",
-            "    } catch {",
-            "        Start-Sleep -Milliseconds 500",
-            "    }",
-            "}",
-            "if (-not $moved) { Remove-Item -Path $pending -Force -ErrorAction SilentlyContinue; exit 1 }",
-            "",
-            "if ($meipass -and (Test-Path $meipass)) {",
-            "    Remove-Item -Path $meipass -Recurse -Force -ErrorAction SilentlyContinue",
-            "}",
-            "",
-            "Unblock-File -Path $pending -ErrorAction SilentlyContinue",
-            "try {",
-            "    Move-Item -Path $pending -Destination $current -Force -ErrorAction Stop",
-            "} catch {",
-            "    Move-Item -Path $old -Destination $current -Force -ErrorAction SilentlyContinue",
-            "    exit 1",
-            "}",
-            "",
-            "$dlDeadline = (Get-Date).AddSeconds(15)",
-            "while ((Test-Path $old) -and (Get-Date) -lt $dlDeadline) {",
-            "    try { Remove-Item -Path $old -Force -ErrorAction Stop; break }",
-            "    catch { Start-Sleep -Milliseconds 500 }",
-            "}",
-            "Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue",
-        ]
-        with open(ps_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-
-        self._status_label.config(text="Applying update…", fg=MUTED)
+        self._status_label.config(text="Launching installer…", fg=MUTED)
 
         CREATE_NO_WINDOW = 0x08000000
         subprocess.Popen(
             [
-                "powershell.exe", "-NonInteractive",
-                "-ExecutionPolicy", "Bypass", "-File", ps_path,
+                installer_path,
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                f"/DIR={install_dir}",
             ],
-            creationflags=CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=CREATE_NO_WINDOW,
             close_fds=True,
         )
 
-        self.root.after(1500, lambda: os._exit(0))
+        # Exit so the installer can replace our files cleanly.
+        self.root.after(1000, lambda: os._exit(0))
 
     def _up_to_date(self):
         self._redraw_btn(self._btn_update, "Up to Date ✓", SUCCESS, tk.NORMAL)
