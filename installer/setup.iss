@@ -15,7 +15,8 @@
 #define MyAppURL       "https://github.com/BlueElliott/Elliotts-Caspar-Controller"
 #define MyAppExeName   "ElliottsCasparController.exe"
 ; Fixed GUID — must never change between versions so in-place upgrades work correctly.
-#define MyAppId        "{A3F7C2D1-8B4E-4F9A-B2C6-E1D8A3F7C2D1}"
+; Note: no braces here — they are added at the AppId line using {{ escape syntax.
+#define MyAppId "A3F7C2D1-8B4E-4F9A-B2C6-E1D8A3F7C2D1"
 
 ; URL of the Lite Caspar Server zip on the matching GitHub release.
 #define LiteServerZipURL \
@@ -24,7 +25,7 @@
   + "/LiteCasparServer.zip"
 
 [Setup]
-AppId={#MyAppId}
+AppId={{{#MyAppId}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
