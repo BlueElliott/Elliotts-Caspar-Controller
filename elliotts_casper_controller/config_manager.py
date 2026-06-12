@@ -18,7 +18,6 @@ DEFAULT_CONFIG = {
     "video_mode": "1080p2500",
     "autostart_caspar": False,
     "instances": [],
-    "defender_exclusion_added": False,
 }
 
 
