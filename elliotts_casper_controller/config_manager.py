@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "startup_delay": 60,
     "video_mode": "1080p2500",
     "autostart_caspar": False,
+    "media_path": "",
     "instances": [],
 }
 
@@ -115,6 +116,7 @@ def regenerate_instance_config(config: dict, inst: dict) -> str:
     """
     port = instance_amcp_port(config, inst)
     inst_id = inst["id"]
+    media_path_xml = config.get("media_path", "").strip() or "media\\"
 
     exe = config.get("caspar_exe_path", "")
     if exe and os.path.isabs(exe):
@@ -146,7 +148,7 @@ def regenerate_instance_config(config: dict, inst: dict) -> str:
   </channels>
 
   <paths>
-    <media-path>media\\</media-path>
+    <media-path>{media_path_xml}</media-path>
     <log-path>log\\inst_{inst_id}\\</log-path>
     <data-path>data\\inst_{inst_id}\\</data-path>
     <template-path>template\\</template-path>
@@ -218,10 +220,14 @@ def ensure_test_pattern_images(config: dict) -> None:
     Called on every server start so test clips are always available.
     Skips if exe path is not set or media folder doesn't exist yet.
     """
-    exe = config.get("caspar_exe_path", "")
-    if not exe or not os.path.isabs(exe):
-        return
-    media_dir = os.path.join(os.path.dirname(exe), "media")
+    custom_media = config.get("media_path", "").strip()
+    if custom_media:
+        media_dir = custom_media
+    else:
+        exe = config.get("caspar_exe_path", "")
+        if not exe or not os.path.isabs(exe):
+            return
+        media_dir = os.path.join(os.path.dirname(exe), "media")
     os.makedirs(media_dir, exist_ok=True)
     try:
         from PIL import Image

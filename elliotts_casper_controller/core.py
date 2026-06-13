@@ -6,8 +6,8 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from elliotts_casper_controller import __version__
@@ -350,6 +350,7 @@ class ConfigUpdate(BaseModel):
     startup_delay: Optional[int] = None
     video_mode: Optional[str] = None
     autostart_caspar: Optional[bool] = None
+    media_path: Optional[str] = None
     instances: Optional[list] = None
 
 
@@ -618,10 +619,14 @@ def api_instance_load_clip(inst_id: int, clip: str, loop: bool = True):
 @app.get("/api/media")
 def api_media():
     cfg = load_config()
-    exe = cfg.get("caspar_exe_path", "")
-    if not exe or not os.path.isfile(exe):
-        return {"clips": [], "error": "CasparCG exe path not set"}
-    media_dir = os.path.join(os.path.dirname(exe), "media")
+    custom_media = cfg.get("media_path", "").strip()
+    if custom_media and os.path.isdir(custom_media):
+        media_dir = custom_media
+    else:
+        exe = cfg.get("caspar_exe_path", "")
+        if not exe or not os.path.isfile(exe):
+            return {"clips": [], "error": "CasparCG exe path not set"}
+        media_dir = os.path.join(os.path.dirname(exe), "media")
     if not os.path.isdir(media_dir):
         return {"clips": [], "error": f"Media folder not found: {media_dir}"}
     MEDIA_EXTS = {".mp4", ".mov", ".avi", ".mxf", ".mkv", ".wmv", ".flv",
@@ -654,6 +659,33 @@ def api_config_post(update: ConfigUpdate):
     save_config(cfg)
     regenerate_all_instance_configs(cfg)
     _log_event("Config saved and instance configs regenerated.")
+    return {"ok": True}
+
+
+@app.get("/api/config/export")
+def api_config_export():
+    import json as _json
+    cfg = load_config()
+    content = _json.dumps(cfg, indent=2).encode("utf-8")
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=elliotts_caspar_config.json"},
+    )
+
+
+@app.post("/api/config/import")
+async def api_config_import(request: Request):
+    import json as _json
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Config must be a JSON object")
+    save_config(body)
+    regenerate_all_instance_configs(body)
+    _log_event("Config imported via web UI.")
     return {"ok": True}
 
 
@@ -1108,6 +1140,10 @@ def page_settings():
         Auto-start CasparCG when the app launches
       </label>
     </div>
+    <div class="form-group" style="grid-column:1/-1">
+      <label>Media Folder Path <span style="color:var(--muted);font-size:11px">(leave blank to use <code>media\</code> next to casparcg.exe)</span></label>
+      <input type="text" id="media_path" placeholder="e.g. D:\\Media or leave blank for default">
+    </div>
   </div>
 
   <h2 style="margin:20px 0 8px">Instances</h2>
@@ -1133,6 +1169,18 @@ def page_settings():
     Each instance is a separate CasparCG process with its own AMCP port. Restart CasparCG after saving to apply changes.
   </p>
 </div>
+
+<!-- Config Import / Export -->
+<div class="card" style="margin-top:16px">
+  <h2 style="margin-bottom:8px">Config Backup</h2>
+  <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+    Export your full configuration as a JSON file, or import a previously saved config (this will overwrite all current settings).
+  </p>
+  <div style="display:flex;gap:10px">
+    <button class="btn btn-secondary" onclick="exportConfig()">Export Config</button>
+    <button class="btn btn-secondary" onclick="importConfig()">Import Config</button>
+  </div>
+</div>
 """
     js = """
 let currentInstances = [];
@@ -1146,6 +1194,7 @@ function loadSettings() {
     document.getElementById('amcp_base_port').value = cfg.amcp_base_port || 5250;
     document.getElementById('web_port').value = cfg.web_port || 5280;
     document.getElementById('autostart_caspar').checked = !!cfg.autostart_caspar;
+    document.getElementById('media_path').value = cfg.media_path || '';
     currentInstances = (cfg.instances || []).map(inst => ({
       ...inst,
       type: inst.type || 'html',
@@ -1288,12 +1337,52 @@ function saveSettings() {
     amcp_base_port:   parseInt(document.getElementById('amcp_base_port').value),
     web_port:         parseInt(document.getElementById('web_port').value),
     autostart_caspar: document.getElementById('autostart_caspar').checked,
+    media_path:       document.getElementById('media_path').value.trim(),
     instances,
   };
   api('/api/config', 'POST', payload).then(() => {
     currentInstances = instances;
     toast('Settings saved — restart CasparCG to apply', 'success');
   }).catch(() => toast('Failed to save settings', 'error'));
+}
+
+function exportConfig() {
+  fetch('/api/config/export')
+    .then(r => r.blob())
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'elliotts_caspar_config.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast('Config exported', 'success');
+    })
+    .catch(() => toast('Export failed', 'error'));
+}
+
+function importConfig() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.onchange = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      let cfg;
+      try { cfg = JSON.parse(ev.target.result); }
+      catch { toast('Invalid JSON file', 'error'); return; }
+      if (!confirm('This will replace all current settings. Continue?')) return;
+      api('/api/config/import', 'POST', cfg)
+        .then(() => { toast('Config imported', 'success'); loadSettings(); })
+        .catch(() => toast('Import failed', 'error'));
+    };
+    reader.readAsText(file);
+  };
+  input.click();
 }
 
 loadSettings();

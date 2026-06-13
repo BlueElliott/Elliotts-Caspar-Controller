@@ -39,6 +39,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Set up MSVC (needed to compile PyInstaller bootloader)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Rebuild PyInstaller bootloader from source
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/pyinstaller/pyinstaller.git _pyi_src
+          cd _pyi_src/bootloader
+          python waf all --target-arch=64bit
+          cd ../..
+          python - <<'EOF'
+          import PyInstaller, os, shutil
+          src = os.path.join("_pyi_src", "PyInstaller", "bootloader", "Windows-64bit-intel")
+          dst = os.path.join(os.path.dirname(PyInstaller.__file__), "bootloader", "Windows-64bit-intel")
+          os.makedirs(dst, exist_ok=True)
+          for f in os.listdir(src):
+              shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
+          print("Bootloader replaced:", os.listdir(dst))
+          EOF
+
       - name: Extract version
         id: version
         shell: bash

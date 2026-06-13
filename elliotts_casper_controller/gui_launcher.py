@@ -550,9 +550,7 @@ class CasparControllerGUI:
 
         confirmed = messagebox.askyesno(
             "Install Update",
-            f"Download and install v{latest} now?\n\n"
-            "The app will close and the installer will run silently.\n"
-            "Reopen it from your shortcut when done.",
+            f"Download and install v{latest} now?\n\nThe app will close to apply the update.",
             parent=self.root,
         )
         if not confirmed:
