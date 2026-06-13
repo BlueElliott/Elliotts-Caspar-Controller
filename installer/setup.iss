@@ -1,5 +1,5 @@
 ; Elliott's Caspar Controller -- Inno Setup installer script
-; Build: iscc /DMyAppVersion="2.0.2" setup.iss
+; Build: iscc /DMyAppVersion="2.0.4" setup.iss
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
@@ -10,8 +10,7 @@
 #define MyAppPublisher "BlueElliott"
 #define MyAppURL       "https://github.com/BlueElliott/Elliotts-Caspar-Controller"
 #define MyAppExeName   "ElliottsCasparController.exe"
-; Fixed GUID -- must never change between versions so in-place upgrades work correctly.
-; No braces in the #define -- they are added at AppId using {{ escape syntax.
+; Fixed GUID -- no braces here, added at AppId line via {{ escape.
 #define MyAppId "A3F7C2D1-8B4E-4F9A-B2C6-E1D8A3F7C2D1"
 
 [Setup]
@@ -22,7 +21,6 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-; User-local Programs -- no admin rights needed.
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
@@ -39,7 +37,6 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Setup
-; Close the running app silently during silent updates.
 CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
@@ -80,6 +77,11 @@ Type: files; Name: "{app}\*.config"
 Type: files; Name: "{app}\*.old"
 
 [Code]
+
+// Windows URLDownloadToFile API -- downloads directly via WinInet, no PowerShell involved.
+function URLDownloadToFile(pCaller: IUnknown; szURL: string; szFileName: string;
+  dwReserved: DWORD; lpfnCB: IUnknown): HResult;
+  external 'URLDownloadToFileW@urlmon.dll stdcall';
 
 var
   CasparDirPage: TInputDirWizardPage;
@@ -122,14 +124,9 @@ begin
   end;
 end;
 
-function GetCasparInstallDir(Param: String): String;
-begin
-  Result := FCasparInstallDir;
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ZipUrl, ZipPath, ExtractDir, ScriptPath, PSContent, PSArgs: String;
+  ZipUrl, ZipPath, ExtractDir, PSArgs: String;
   ResultCode: Integer;
 begin
   if (CurStep = ssPostInstall) and IsComponentSelected('caspar') then
@@ -137,40 +134,42 @@ begin
     ZipUrl     := 'https://github.com/BlueElliott/Elliotts-Caspar-Controller/releases/download/v{#MyAppVersion}/LiteCasparServer.zip';
     ZipPath    := ExpandConstant('{tmp}\LiteCasparServer.zip');
     ExtractDir := FCasparInstallDir;
-    ScriptPath := ExpandConstant('{tmp}\DownloadCaspar.ps1');
-
-    // Build and save a PS1 script to avoid inline quoting/escaping issues.
-    PSContent :=
-      '$url = ''' + ZipUrl + '''' + #13#10 +
-      '$zip = ''' + ZipPath + '''' + #13#10 +
-      '$out = ''' + ExtractDir + '''' + #13#10 +
-      'try {' + #13#10 +
-      '  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing' + #13#10 +
-      '  New-Item -ItemType Directory -Force -Path $out | Out-Null' + #13#10 +
-      '  Expand-Archive -Path $zip -DestinationPath $out -Force' + #13#10 +
-      '  Remove-Item -Path $zip -Force -ErrorAction SilentlyContinue' + #13#10 +
-      '} catch { exit 1 }' + #13#10;
-    SaveStringToFile(ScriptPath, PSContent, False);
 
     WizardForm.StatusLabel.Caption := 'Downloading Lite Caspar Server (~500 MB) -- please wait...';
     WizardForm.StatusLabel.Update;
 
-    PSArgs := '-NonInteractive -ExecutionPolicy Bypass -File "' + ScriptPath + '"';
-
-    if not Exec('powershell.exe', PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or
-       (ResultCode <> 0) then
+    // Download via Windows URLDownloadToFile -- no scripts written to disk.
+    if URLDownloadToFile(nil, ZipUrl, ZipPath, 0, nil) <> 0 then
     begin
       MsgBox(
-        'Could not download or extract the Lite Caspar Server.' + #13#10 +
-        'Check your internet connection and try downloading LiteCasparServer.zip' + #13#10 +
-        'manually from the GitHub releases page:' + #13#10 +
+        'Download failed. Check your internet connection.' + #13#10 +
+        'You can download LiteCasparServer.zip manually from:' + #13#10 +
         '{#MyAppURL}/releases',
         mbError, MB_OK
       );
+      Exit;
     end;
 
-    // Clean up temp files
-    DeleteFile(ScriptPath);
+    WizardForm.StatusLabel.Caption := 'Extracting Lite Caspar Server...';
+    WizardForm.StatusLabel.Update;
+
+    ForceDirectories(ExtractDir);
+
+    // Extract using a single inline PowerShell command -- no script file written to disk.
+    PSArgs :=
+      '-NonInteractive -ExecutionPolicy Bypass -Command ' +
+      '"Expand-Archive -Path ''' + ZipPath + ''' ' +
+      '-DestinationPath ''' + ExtractDir + ''' -Force"';
+
+    Exec('powershell.exe', PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
     DeleteFile(ZipPath);
+
+    if ResultCode <> 0 then
+      MsgBox(
+        'Extraction failed. Download LiteCasparServer.zip manually from:' + #13#10 +
+        '{#MyAppURL}/releases',
+        mbError, MB_OK
+      );
   end;
 end;
