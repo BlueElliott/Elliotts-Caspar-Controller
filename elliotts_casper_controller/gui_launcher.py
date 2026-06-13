@@ -109,6 +109,9 @@ class CasparControllerGUI:
 
         self._tray_icon: pystray.Icon | None = None
 
+        self._disco_mode = False
+        self._disco_click_count = 0
+
         self._load_fonts()
         self._set_window_icon()
         self._build_ui()
@@ -207,10 +210,14 @@ class CasparControllerGUI:
         top.pack_propagate(False)
         title_f = tk.Frame(top, bg=BG_DARK)
         title_f.pack(expand=True)
-        tk.Label(title_f, text="Elliott's Caspar Controller",
-                 font=self.font_bold24, bg=BG_DARK, fg=TEXT).pack()
-        tk.Label(title_f, text=f"Version {__version__}",
-                 font=self.font_reg, bg=BG_DARK, fg=MUTED).pack()
+        self._title_label = tk.Label(title_f, text="Elliott's Caspar Controller",
+                                      font=self.font_bold24, bg=BG_DARK, fg=TEXT,
+                                      cursor="hand2")
+        self._title_label.pack()
+        self._title_label.bind("<Button-1>", self._on_title_click)
+        self._version_label = tk.Label(title_f, text=f"Version {__version__}",
+                                        font=self.font_reg, bg=BG_DARK, fg=MUTED)
+        self._version_label.pack()
 
         # ---- Content ----
         content = tk.Frame(root, bg=BG_DARK)
@@ -298,8 +305,10 @@ class CasparControllerGUI:
 
         row3 = tk.Frame(btn_area, bg=BG_DARK)
         row3.pack(pady=4)
-        self._make_btn(row3, "Hide to Tray", self._hide_to_tray, BTN_GRAY, h=46).pack(side=tk.LEFT, padx=6)
-        self._make_btn(row3, "Quit", self._on_close, BTN_RED_DK, h=46).pack(side=tk.LEFT, padx=6)
+        self._btn_hide = self._make_btn(row3, "Hide to Tray", self._hide_to_tray, BTN_GRAY, h=46)
+        self._btn_hide.pack(side=tk.LEFT, padx=6)
+        self._btn_quit = self._make_btn(row3, "Quit", self._on_close, BTN_RED_DK, h=46)
+        self._btn_quit.pack(side=tk.LEFT, padx=6)
 
     def _fit_window_height(self):
         self.root.update_idletasks()
@@ -1018,6 +1027,74 @@ class CasparControllerGUI:
         # otherwise show "Failed to remove temporary directory" if AV or the
         # Windows Search indexer still holds a handle on an extracted file.
         os._exit(0)
+
+    # -----------------------------------------------------------------------
+    # Easter egg — disco mode (click title 10 times to activate)
+    # -----------------------------------------------------------------------
+
+    _DISCO_COLORS = [
+        "#ff2020", "#ff6600", "#ffdd00", "#44ff00",
+        "#00ffaa", "#00eeff", "#0088ff", "#8800ff",
+        "#ff00ff", "#ff0077",
+    ]
+
+    _DISCO_SUBTITLES = [
+        "** DISCO MODE ACTIVATED **",
+        "** GET ON THE DANCEFLOOR **",
+        "** BOOGIE WOOGIE **",
+        "** PARTY TIME **",
+        "** YASSS QUEEN **",
+        "** LETS GOOO **",
+        "** ITS A VIBE **",
+        "** FEELING IT **",
+    ]
+
+    def _set_btn_color(self, cv, color: str):
+        for item in cv.find_all():
+            if cv.type(item) != "text":
+                cv.itemconfig(item, fill=color, outline=color)
+        cv._color = color
+
+    def _on_title_click(self, _event=None):
+        self._disco_click_count += 1
+        if self._disco_click_count < 10:
+            return
+        self._disco_click_count = 0
+        if not self._disco_mode:
+            self._start_disco()
+        else:
+            self._stop_disco()
+
+    def _start_disco(self):
+        import random
+        self._disco_mode = True
+        self._title_label.config(text="Elliott's Caspar Controller")
+        self._version_label.config(text=random.choice(self._DISCO_SUBTITLES), fg=TEXT)
+        self._disco_tick()
+
+    def _stop_disco(self):
+        self._disco_mode = False
+        self._title_label.config(text="Elliott's Caspar Controller", fg=TEXT)
+        self._version_label.config(text=f"Version {__version__}", fg=MUTED)
+        self._set_btn_color(self._btn_start,  BTN_GREEN)
+        self._set_btn_color(self._btn_stop,   BTN_RED)
+        self._set_btn_color(self._btn_web,    BTN_BLUE)
+        self._set_btn_color(self._btn_update, ACCENT)
+        self._set_btn_color(self._btn_hide,   BTN_GRAY)
+        self._set_btn_color(self._btn_quit,   BTN_RED_DK)
+
+    def _disco_tick(self):
+        if not self._disco_mode:
+            return
+        import random
+        c = self._DISCO_COLORS
+        self._title_label.config(fg=random.choice(c))
+        self._version_label.config(fg=random.choice(c),
+                                    text=random.choice(self._DISCO_SUBTITLES))
+        for btn in (self._btn_start, self._btn_stop, self._btn_web,
+                    self._btn_update, self._btn_hide, self._btn_quit):
+            self._set_btn_color(btn, random.choice(c))
+        self.root.after(120, self._disco_tick)
 
     # -----------------------------------------------------------------------
     # Run
