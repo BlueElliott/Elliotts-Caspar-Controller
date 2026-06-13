@@ -1071,6 +1071,11 @@ class CasparControllerGUI:
         self._title_label.config(text="Elliott's Caspar Controller")
         self._version_label.config(text=random.choice(self._DISCO_SUBTITLES), fg=TEXT)
         self._disco_tick()
+        self.root.after(10000, self._auto_stop_disco)
+
+    def _auto_stop_disco(self):
+        if self._disco_mode:
+            self._stop_disco()
 
     def _stop_disco(self):
         self._disco_mode = False
