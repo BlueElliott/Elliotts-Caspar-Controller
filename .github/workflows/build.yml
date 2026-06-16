@@ -218,11 +218,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Walk back through recent releases until we find one with LiteCasparServer.zip
+          # Search all recent releases (including pre-releases) for LiteCasparServer.zip
           FOUND=""
-          for TAG in $(gh release list --repo ${{ github.repository }} --limit 20 --json tagName --jq '.[].tagName'); do
+          TAGS=$(gh release list --repo ${{ github.repository }} --limit 50 \
+            --json tagName,isPrerelease --jq '.[].tagName')
+          for TAG in $TAGS; do
             if [ "$TAG" = "${{ github.ref_name }}" ]; then
-              continue  # skip the release we're about to create
+              continue
             fi
             if gh release view "$TAG" --repo ${{ github.repository }} --json assets \
                --jq '.assets[].name' 2>/dev/null | grep -q "^LiteCasparServer.zip$"; then
@@ -234,7 +236,7 @@ jobs:
             fi
           done
           if [ -z "$FOUND" ]; then
-            echo "No previous release has LiteCasparServer.zip — skipping (users can still download CasparCG separately)"
+            echo "No release has LiteCasparServer.zip — it will be absent from this release"
           fi
 
       - name: Generate release notes
@@ -287,6 +289,7 @@ jobs:
           files: |
             artifacts/windows-installer/ElliottsCasparControllerSetup.exe
             artifacts/LiteCasparServer.zip
+          fail_on_unmatched_files: false
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
