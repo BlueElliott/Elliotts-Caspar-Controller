@@ -1,14 +1,19 @@
 """FastAPI application — web UI and REST API for Elliott's Caspar Controller."""
+import secrets
 import threading
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Optional
 
+import requests as _requests
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from elliotts_casper_controller import __version__
 from elliotts_casper_controller.amcp_client import AMCPClient
@@ -27,6 +32,7 @@ _config = load_config()
 _managers: dict = {}   # inst_id -> CasparProcessManager
 _log: list = []
 _log_lock = threading.Lock()
+_sessions: set = set()  # active session tokens for web UI auth
 
 MAX_LOG = 200
 
@@ -71,6 +77,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Elliott's Caspar Controller", version=__version__, lifespan=lifespan)
+
+
+class _AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        cfg = load_config()
+        if not cfg.get("web_password_enabled") or not cfg.get("web_password", "").strip():
+            return await call_next(request)
+        path = request.url.path
+        if path.startswith("/login") or path.startswith("/static") or path.startswith("/api/"):
+            return await call_next(request)
+        host = (request.client.host if request.client else "") or ""
+        if host in ("127.0.0.1", "::1", "localhost"):
+            return await call_next(request)
+        if request.cookies.get("session", "") in _sessions:
+            return await call_next(request)
+        return RedirectResponse(url="/login")
+
+
+app.add_middleware(_AuthMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +281,30 @@ label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px
 .mv-label { padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
 .mv-label span { font-size: 13px; font-weight: 600; }
 
+/* REMOTE CONTROLLER SECTIONS */
+.remote-section { margin-bottom: 12px; }
+.remote-header {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 18px; cursor: pointer;
+  user-select: none; transition: border-color 0.2s;
+}
+.remote-header:hover { border-color: var(--accent); }
+.remote-header .remote-chevron {
+  font-size: 11px; color: var(--muted); transition: transform 0.2s; margin-left: 2px;
+}
+.remote-header.collapsed .remote-chevron { transform: rotate(-90deg); }
+.remote-body {
+  padding: 12px 4px 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.remote-body.hidden { display: none; }
+.remote-offline-msg {
+  grid-column: 1 / -1; color: var(--muted); font-size: 13px; padding: 8px 0;
+}
+
 /* TABLE */
 table { width: 100%; border-collapse: collapse; }
 thead { background: var(--accent); }
@@ -284,26 +333,35 @@ function api(url, method='GET', body=null) {
 """
 
 
-def nav(active: str) -> str:
+def nav(active: str, server_name: str = "") -> str:
     links = [("Dashboard", "/", "dashboard"), ("HTTP Generator", "/http-generator", "http-generator"), ("Settings", "/settings", "settings")]
     items = "".join(f'<a href="{href}" class="{"active" if key == active else ""}">{label}</a>' for label, href, key in links)
-    return f'<nav class="nav">{items}</nav>'
+    name_chip = (f'<span style="font-weight:700;color:var(--accent);padding:4px 10px;'
+                 f'border-right:1px solid var(--border);margin-right:4px;font-size:13px">'
+                 f'{server_name}</span>') if server_name else ""
+    return f'<nav class="nav">{name_chip}{items}</nav>'
 
 
 def page(title: str, active: str, body: str, extra_js: str = "") -> str:
+    cfg = load_config()
+    server_name = cfg.get("server_name", "").strip()
+    tab_title = f"{title} — {server_name}" if server_name else f"{title} — Elliott's Caspar Controller"
+    subtitle = (f'<p style="color:var(--muted);font-size:13px;margin-top:4px;margin-bottom:20px">'
+                f'{server_name}</p>') if server_name else '<div style="margin-bottom:24px"></div>'
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} — Elliott's Caspar Controller</title>
+<title>{tab_title}</title>
 <style>{BASE_CSS}</style>
 </head>
 <body>
-{nav(active)}
+{nav(active, server_name)}
 <div id="toast-container"></div>
 <main class="main">
-<h1 style="margin-bottom:24px">{title}</h1>
+<h1>{title}</h1>
+{subtitle}
 {body}
 </main>
 <script>{JS_SHARED}{extra_js}</script>
@@ -351,7 +409,15 @@ class ConfigUpdate(BaseModel):
     video_mode: Optional[str] = None
     autostart_caspar: Optional[bool] = None
     media_path: Optional[str] = None
+    server_name: Optional[str] = None
+    web_password: Optional[str] = None
+    web_password_enabled: Optional[bool] = None
     instances: Optional[list] = None
+    remote_controllers: Optional[list] = None
+
+
+class _LoginRequest(BaseModel):
+    password: str
 
 
 @app.get("/api/status")
@@ -385,7 +451,13 @@ def api_status():
         })
     any_running = any(i["status"] == "live" for i in instances_out)
     needs_setup = not cfg.get("caspar_exe_path") or not instances
-    return {"running": any_running, "version": __version__, "instances": instances_out, "needs_setup": needs_setup}
+    return {
+        "running": any_running,
+        "version": __version__,
+        "instances": instances_out,
+        "needs_setup": needs_setup,
+        "server_name": cfg.get("server_name", ""),
+    }
 
 
 @app.post("/api/server/start")
@@ -689,6 +761,134 @@ async def api_config_import(request: Request):
     return {"ok": True}
 
 
+@app.get("/api/remotes")
+def api_remotes():
+    cfg = load_config()
+    remotes = cfg.get("remote_controllers", [])
+    if not remotes:
+        return {"remotes": []}
+
+    def _fetch(idx: int, remote: dict) -> dict:
+        url = remote.get("url", "").rstrip("/")
+        label = remote.get("label", "").strip()
+        try:
+            r = _requests.get(f"{url}/api/status", timeout=2)
+            data = r.json()
+            remote_name = data.get("server_name", "") or label or url
+            return {
+                "idx": idx, "url": url, "label": label,
+                "display_name": label or remote_name or url,
+                "online": True, "status": data,
+            }
+        except Exception:
+            return {
+                "idx": idx, "url": url, "label": label,
+                "display_name": label or url,
+                "online": False, "status": None,
+            }
+
+    results: list = [None] * len(remotes)
+    with ThreadPoolExecutor(max_workers=max(len(remotes), 1)) as ex:
+        futs = {ex.submit(_fetch, i, r): i for i, r in enumerate(remotes)}
+        for f in futs:
+            results[futs[f]] = f.result()
+    return {"remotes": results}
+
+
+class _RemoteTestRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/remote/test")
+def api_remote_test(req: _RemoteTestRequest):
+    url = req.url.rstrip("/")
+    try:
+        r = _requests.get(f"{url}/api/status", timeout=3)
+        data = r.json()
+        return {"online": True, "server_name": data.get("server_name", ""), "version": data.get("version", "")}
+    except Exception:
+        return {"online": False}
+
+
+class _RemoteProxyRequest(BaseModel):
+    path: str
+    body: Optional[dict] = None
+
+
+@app.post("/api/remote/{idx}/proxy")
+def api_remote_proxy(idx: int, req: _RemoteProxyRequest):
+    cfg = load_config()
+    remotes = cfg.get("remote_controllers", [])
+    if idx < 0 or idx >= len(remotes):
+        raise HTTPException(status_code=404, detail=f"Remote {idx} not found")
+    url = remotes[idx].get("url", "").rstrip("/")
+    try:
+        if req.body is not None:
+            r = _requests.post(f"{url}{req.path}", json=req.body, timeout=5)
+        else:
+            r = _requests.post(f"{url}{req.path}", timeout=5)
+        return r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Remote unreachable: {e}")
+
+
+@app.get("/login", response_class=HTMLResponse)
+def page_login(error: str = ""):
+    cfg = load_config()
+    server_name = cfg.get("server_name", "").strip()
+    name_html = (f'<p style="color:var(--muted);font-size:14px;margin-bottom:24px">{server_name}</p>'
+                 if server_name else '<div style="margin-bottom:24px"></div>')
+    error_html = (f'<p style="color:var(--error);font-size:13px;margin-bottom:12px">{error}</p>'
+                  if error else "")
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login — Elliott's Caspar Controller</title>
+<style>{BASE_CSS}</style></head>
+<body style="display:flex;align-items:center;justify-content:center;min-height:100vh">
+<div class="card" style="width:380px;padding:32px">
+  <h1 style="margin-bottom:4px">Elliott's Caspar Controller</h1>
+  {name_html}
+  {error_html}
+  <div class="form-group">
+    <label>Password</label>
+    <input type="password" id="pw" placeholder="Enter password" autofocus>
+  </div>
+  <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Sign In</button>
+  <p style="color:var(--muted);font-size:12px;margin-top:16px;text-align:center">
+    Connecting from this machine? Use <a href="http://127.0.0.1:{cfg.get('web_port', 5280)}">localhost</a> to bypass.
+  </p>
+</div>
+<script>
+function doLogin() {{
+  const pw = document.getElementById('pw').value;
+  fetch('/login', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{password:pw}})}})
+    .then(r => r.json().then(d => ({{ok:r.ok,d}})))
+    .then(({{ok,d}}) => {{ if (ok) location.href='/'; else document.querySelector('.card').insertAdjacentHTML('afterbegin','<p style="color:var(--error);margin-bottom:12px">'+d.detail+'</p>'); }});
+}}
+document.addEventListener('keydown', e => {{ if (e.key==='Enter') doLogin(); }});
+</script>
+</body></html>""")
+
+
+@app.post("/login")
+def api_login(req: _LoginRequest, response: Response):
+    cfg = load_config()
+    if req.password == cfg.get("web_password", ""):
+        token = secrets.token_urlsafe(32)
+        _sessions.add(token)
+        response.set_cookie("session", token, httponly=True, samesite="lax", max_age=86400 * 30)
+        return {"ok": True}
+    raise HTTPException(status_code=401, detail="Incorrect password")
+
+
+@app.post("/logout")
+def api_logout(request: Request, response: Response):
+    _sessions.discard(request.cookies.get("session", ""))
+    response.delete_cookie("session")
+    return {"ok": True}
+
+
 @app.get("/api/log")
 def api_log():
     with _log_lock:
@@ -727,6 +927,8 @@ def page_dashboard():
 </div>
 
 <div id="instance-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px"></div>
+
+<div id="remotes-section"></div>
 
 <div class="card">
   <h3 style="margin-bottom:10px">Event Log</h3>
@@ -912,8 +1114,131 @@ function sendAmcp(id) {
   }).catch(() => toast('Failed to send AMCP', 'error'));
 }
 
+// ── Remote Controllers ─────────────────────────────────────────
+
+function _remoteCollapseKey(idx) { return 'remote_collapsed_' + idx; }
+
+function _isCollapsed(idx) {
+  return localStorage.getItem(_remoteCollapseKey(idx)) === '1';
+}
+
+function toggleRemote(idx) {
+  const header = document.getElementById('rh_' + idx);
+  const body   = document.getElementById('rb_' + idx);
+  if (!header || !body) return;
+  const collapsed = body.classList.contains('hidden');
+  if (collapsed) {
+    body.classList.remove('hidden');
+    header.classList.remove('collapsed');
+    localStorage.removeItem(_remoteCollapseKey(idx));
+  } else {
+    body.classList.add('hidden');
+    header.classList.add('collapsed');
+    localStorage.setItem(_remoteCollapseKey(idx), '1');
+  }
+}
+
+function remoteInstanceCard(rem, inst) {
+  const isLive = inst.status === 'live';
+  const actionBtn = isLive
+    ? `<button class="btn btn-danger btn-sm" style="width:100%"
+         onclick="remoteInstanceAction(${rem.idx}, ${inst.id}, 'stop')">■ Stop</button>`
+    : `<button class="btn btn-success btn-sm" style="width:100%"
+         onclick="remoteInstanceAction(${rem.idx}, ${inst.id}, 'restart')">▶ Start</button>`;
+  return `
+  <div class="channel-card">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div class="ch-num">Instance ${inst.id} &nbsp;<span style="color:var(--muted);font-size:10px">:${inst.amcp_port}</span></div>
+    </div>
+    <div class="ch-name">${inst.name}</div>
+    <div class="ch-ndi">NDI: ${inst.ndi_name}</div>
+    <span class="badge ${isLive ? 'badge-success' : 'badge-error'}">${inst.status}</span>
+    ${actionBtn}
+  </div>`;
+}
+
+function renderRemotes(remotes) {
+  const sec = document.getElementById('remotes-section');
+  if (!sec) return;
+  if (!remotes || remotes.length === 0) { sec.innerHTML = ''; return; }
+
+  // Build a header row if we don't have one yet
+  let html = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <h2 style="color:var(--muted);font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Remote Controllers</h2>
+  </div>`;
+
+  remotes.forEach(rem => {
+    if (!rem) return;
+    const collapsed = _isCollapsed(rem.idx);
+    const onlineDot = rem.online
+      ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--success);flex-shrink:0;display:inline-block"></span>'
+      : '<span style="width:8px;height:8px;border-radius:50%;background:var(--error);flex-shrink:0;display:inline-block"></span>';
+    const statusBadge = rem.online
+      ? '<span class="badge badge-success" style="font-size:11px">Online</span>'
+      : '<span class="badge badge-error" style="font-size:11px">Offline</span>';
+
+    const liveCount = rem.online && rem.status
+      ? rem.status.instances.filter(i => i.status === 'live').length : 0;
+    const total = rem.online && rem.status ? rem.status.instances.length : 0;
+
+    const actionBtns = rem.online ? `
+      <div style="display:flex;gap:6px;margin-left:auto">
+        <button class="btn btn-success btn-sm"
+          onclick="event.stopPropagation();remoteServerAction(${rem.idx},'start')">Start All</button>
+        <button class="btn btn-danger btn-sm"
+          onclick="event.stopPropagation();remoteServerAction(${rem.idx},'stop')">Stop All</button>
+      </div>` : '';
+
+    const versionBadge = rem.online && rem.status
+      ? `<span style="color:var(--muted);font-size:11px">v${rem.status.version || ''}</span>` : '';
+
+    html += `
+    <div class="remote-section">
+      <div class="remote-header ${collapsed ? 'collapsed' : ''}" id="rh_${rem.idx}"
+           onclick="toggleRemote(${rem.idx})">
+        ${onlineDot}
+        <span style="font-weight:700;font-size:15px">${rem.display_name}</span>
+        ${statusBadge}
+        ${rem.online ? `<span style="color:var(--muted);font-size:12px">${liveCount}/${total} live</span>` : ''}
+        ${versionBadge}
+        <span class="remote-chevron">▼</span>
+        ${actionBtns}
+      </div>
+      <div class="remote-body ${collapsed ? 'hidden' : ''}" id="rb_${rem.idx}">
+        ${rem.online && rem.status && rem.status.instances.length
+          ? rem.status.instances.map(inst => remoteInstanceCard(rem, inst)).join('')
+          : rem.online
+            ? '<div class="remote-offline-msg">No instances configured on this controller.</div>'
+            : `<div class="remote-offline-msg">Cannot reach ${rem.url} — check that the controller is running and the URL is correct.</div>`
+        }
+      </div>
+    </div>`;
+  });
+
+  sec.innerHTML = html;
+}
+
+function updateRemotes() {
+  api('/api/remotes').then(data => renderRemotes(data.remotes || []));
+}
+
+function remoteServerAction(idx, action) {
+  toast('Sending ' + action + ' to remote...', 'info');
+  api('/api/remote/' + idx + '/proxy', 'POST', { path: '/api/server/' + action })
+    .then(d => { toast(d.message || action + ' OK', 'success'); updateRemotes(); })
+    .catch(() => toast('Remote action failed', 'error'));
+}
+
+function remoteInstanceAction(idx, instId, action) {
+  api('/api/remote/' + idx + '/proxy', 'POST', { path: '/api/instance/' + instId + '/' + action })
+    .then(() => { setTimeout(updateRemotes, 2000); updateRemotes(); })
+    .catch(() => toast('Remote action failed', 'error'));
+}
+
 updateStatus();
+updateRemotes();
 setInterval(updateStatus, 4000);
+setInterval(updateRemotes, 5000);
 """
     return HTMLResponse(page("Dashboard", "dashboard", body, js))
 
@@ -1170,6 +1495,55 @@ def page_settings():
   </p>
 </div>
 
+<!-- Remote Controllers -->
+<div class="card" style="margin-top:16px">
+  <h2 style="margin-bottom:8px">Remote Controllers</h2>
+  <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+    Add other Elliott's Caspar Controller instances to monitor and control them from this dashboard.
+    Use the full URL including port, e.g. <code>http://192.168.1.101:5280</code>.
+    The optional label overrides the remote's server name in the dashboard.
+  </p>
+  <div id="remotes-list"></div>
+  <div style="display:flex;gap:10px;margin-top:12px">
+    <button class="btn btn-primary btn-sm" onclick="addRemote()">+ Add Remote</button>
+    <button class="btn btn-primary" onclick="saveRemotes()">Save Remote Controllers</button>
+  </div>
+</div>
+
+<!-- Server Identity & Security -->
+<div class="card" style="margin-top:16px">
+  <h2 style="margin-bottom:16px">Server Identity</h2>
+  <div class="form-group">
+    <label>Server Name <span style="color:var(--muted);font-size:11px">(shown in the nav bar and browser tab — useful when running multiple controllers)</span></label>
+    <input type="text" id="server_name" placeholder="e.g. GFX PC, Studio A, Backup">
+  </div>
+</div>
+
+<!-- Web UI Password -->
+<div class="card" style="margin-top:16px">
+  <h2 style="margin-bottom:8px">Web UI Password</h2>
+  <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+    Restrict access to the web UI from other devices on your network. Connections from this machine (localhost) always bypass the password.
+  </p>
+  <div class="grid-2" style="margin-bottom:12px">
+    <div class="form-group" style="margin:0">
+      <label>Password</label>
+      <input type="password" id="web_password" placeholder="Leave blank to disable">
+    </div>
+    <div class="form-group" style="display:flex;align-items:center;gap:10px;padding-top:22px;margin:0">
+      <input type="checkbox" id="web_password_enabled"
+             style="width:18px;height:18px;flex-shrink:0;accent-color:var(--accent);cursor:pointer">
+      <label for="web_password_enabled" style="margin:0;color:var(--text);cursor:pointer">
+        Enable password protection
+      </label>
+    </div>
+  </div>
+  <button class="btn btn-primary" onclick="saveIdentityAndSecurity()">Save</button>
+  <p style="color:var(--muted);font-size:12px;margin-top:10px">
+    Changes take effect immediately. Existing sessions remain active until the app restarts.
+  </p>
+</div>
+
 <!-- Config Import / Export -->
 <div class="card" style="margin-top:16px">
   <h2 style="margin-bottom:8px">Config Backup</h2>
@@ -1185,6 +1559,68 @@ def page_settings():
     js = """
 let currentInstances = [];
 
+let _remotes = [];
+
+function renderRemoteList() {
+  const el = document.getElementById('remotes-list');
+  if (!_remotes.length) {
+    el.innerHTML = '<p style="color:var(--muted);font-size:13px;margin-bottom:8px">No remote controllers added yet.</p>';
+    return;
+  }
+  el.innerHTML = _remotes.map((r, i) => `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <input type="text" id="remote_url_${i}" value="${(r.url||'').replace(/"/g,'&quot;')}"
+             placeholder="http://192.168.1.101:5280"
+             style="flex:2;min-width:0">
+      <input type="text" id="remote_label_${i}" value="${(r.label||'').replace(/"/g,'&quot;')}"
+             placeholder="Label (optional)"
+             style="flex:1;min-width:0">
+      <button class="btn btn-secondary btn-sm" onclick="testRemote(${i})" title="Test connection">Test</button>
+      <button class="btn btn-danger btn-sm" style="flex-shrink:0"
+              onclick="removeRemote(${i})">×</button>
+    </div>`).join('');
+}
+
+function addRemote() {
+  _remotes = getFormRemotes();
+  _remotes.push({ url: '', label: '' });
+  renderRemoteList();
+}
+
+function removeRemote(i) {
+  _remotes = getFormRemotes();
+  _remotes.splice(i, 1);
+  renderRemoteList();
+}
+
+function getFormRemotes() {
+  return _remotes.map((_, i) => ({
+    url:   (document.getElementById('remote_url_'   + i)?.value || '').trim(),
+    label: (document.getElementById('remote_label_' + i)?.value || '').trim(),
+  })).filter(r => r.url);
+}
+
+function testRemote(i) {
+  const url = (document.getElementById('remote_url_' + i)?.value || '').trim();
+  if (!url) { toast('Enter a URL first', 'warning'); return; }
+  toast('Testing connection...', 'info');
+  api('/api/remote/test', 'POST', { url }).then(d => {
+    if (d.online) {
+      const name = d.server_name || url;
+      toast('Connected! ' + name + ' (v' + (d.version || '?') + ')', 'success');
+    } else {
+      toast('Could not reach ' + url, 'error');
+    }
+  }).catch(() => toast('Test failed', 'error'));
+}
+
+function saveRemotes() {
+  const remotes = getFormRemotes();
+  api('/api/config', 'POST', { remote_controllers: remotes })
+    .then(() => { _remotes = remotes; renderRemoteList(); toast('Remote controllers saved', 'success'); })
+    .catch(() => toast('Failed to save', 'error'));
+}
+
 function loadSettings() {
   api('/api/config').then(cfg => {
     const exePath = cfg.caspar_exe_path || '';
@@ -1195,6 +1631,11 @@ function loadSettings() {
     document.getElementById('web_port').value = cfg.web_port || 5280;
     document.getElementById('autostart_caspar').checked = !!cfg.autostart_caspar;
     document.getElementById('media_path').value = cfg.media_path || '';
+    document.getElementById('server_name').value = cfg.server_name || '';
+    document.getElementById('web_password').value = cfg.web_password || '';
+    document.getElementById('web_password_enabled').checked = !!cfg.web_password_enabled;
+    _remotes = (cfg.remote_controllers || []);
+    renderRemoteList();
     currentInstances = (cfg.instances || []).map(inst => ({
       ...inst,
       type: inst.type || 'html',
@@ -1344,6 +1785,17 @@ function saveSettings() {
     currentInstances = instances;
     toast('Settings saved — restart CasparCG to apply', 'success');
   }).catch(() => toast('Failed to save settings', 'error'));
+}
+
+function saveIdentityAndSecurity() {
+  const payload = {
+    server_name:          document.getElementById('server_name').value.trim(),
+    web_password:         document.getElementById('web_password').value,
+    web_password_enabled: document.getElementById('web_password_enabled').checked,
+  };
+  api('/api/config', 'POST', payload)
+    .then(() => { toast('Identity & security saved', 'success'); location.reload(); })
+    .catch(() => toast('Failed to save', 'error'));
 }
 
 function exportConfig() {

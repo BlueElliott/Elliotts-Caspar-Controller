@@ -18,7 +18,11 @@ DEFAULT_CONFIG = {
     "video_mode": "1080p2500",
     "autostart_caspar": False,
     "media_path": "",
+    "server_name": "",
+    "web_password": "",
+    "web_password_enabled": False,
     "instances": [],
+    "remote_controllers": [],
 }
 
 
@@ -82,6 +86,7 @@ def load() -> dict:
     config.setdefault("amcp_base_port", 5250)
     config.setdefault("autostart_caspar", False)
     config.setdefault("instances", [])
+    config.setdefault("remote_controllers", [])
     if config.get("startup_delay", 60) <= 15:
         config["startup_delay"] = 60
 
