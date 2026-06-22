@@ -33,6 +33,7 @@ _managers: dict = {}   # inst_id -> CasparProcessManager
 _log: list = []
 _log_lock = threading.Lock()
 _sessions: set = set()  # active session tokens for web UI auth
+_remote_name_cache: dict = {}  # url -> last known server_name for offline display
 
 MAX_LOG = 200
 
@@ -771,19 +772,24 @@ def api_remotes():
         return {"remotes": []}
 
     def _fetch(idx: int, remote: dict) -> dict:
+        global _remote_name_cache
         url = remote.get("url", "").rstrip("/")
         try:
-            r = _requests.get(f"{url}/api/status", timeout=2)
+            # 6s timeout: remote /api/status pings up to 6 AMCP ports in parallel
+            # (each join has a 3s timeout) so 5s gives a comfortable margin
+            r = _requests.get(f"{url}/api/status", timeout=6)
             data = r.json()
             server_name = data.get("server_name", "").strip()
-            if not server_name:
-                # Older versions don't return server_name in /api/status — try /api/config
+            if not server_name and url not in _remote_name_cache:
+                # Only fetch config the first time — afterwards use the cache
                 try:
-                    cfg_r = _requests.get(f"{url}/api/config", timeout=2)
+                    cfg_r = _requests.get(f"{url}/api/config", timeout=4)
                     server_name = cfg_r.json().get("server_name", "").strip()
                 except Exception:
                     pass
-            display_name = server_name or url
+            if server_name:
+                _remote_name_cache[url] = server_name
+            display_name = server_name or _remote_name_cache.get(url) or url
             return {
                 "idx": idx, "url": url,
                 "display_name": display_name,
@@ -792,7 +798,7 @@ def api_remotes():
         except Exception:
             return {
                 "idx": idx, "url": url,
-                "display_name": url,
+                "display_name": _remote_name_cache.get(url) or url,
                 "online": False, "status": None,
             }
 
@@ -1139,6 +1145,8 @@ function sendAmcp(id) {
 
 // ── Remote Controllers ─────────────────────────────────────────
 
+const _remoteStatusCache = {};  // idx -> last known status object
+
 function _remoteCollapseKey(idx) { return 'remote_collapsed_' + idx; }
 
 function _isCollapsed(idx) {
@@ -1207,32 +1215,37 @@ function renderRemotes(remotes) {
   remotes.forEach(rem => {
     if (!rem) return;
     const collapsed = _isCollapsed(rem.idx);
-    const liveCount = rem.online && rem.status
-      ? rem.status.instances.filter(i => i.status === 'live').length : 0;
-    const total = rem.online && rem.status ? rem.status.instances.length : 0;
+    // Cache status when online so we can show stale data when offline
+    if (rem.online && rem.status) _remoteStatusCache[rem.idx] = rem.status;
+    const effectiveStatus = rem.online ? rem.status : _remoteStatusCache[rem.idx];
+
+    const liveCount = effectiveStatus
+      ? effectiveStatus.instances.filter(i => i.status === 'live').length : 0;
+    const total = effectiveStatus ? effectiveStatus.instances.length : 0;
 
     const statusBadge = rem.online
       ? `<span class="badge badge-success" style="font-size:11px;white-space:nowrap">● Online</span>`
       : `<span class="badge badge-error"   style="font-size:11px;white-space:nowrap">● Offline</span>`;
 
-    const liveChip = rem.online
+    const liveChip = effectiveStatus
       ? `<span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);border-radius:20px;
                       padding:4px 12px;font-size:13px;color:var(--success);white-space:nowrap;font-weight:600">
            ${liveCount}/${total} live
          </span>` : '';
 
-    const versionChip = rem.online && rem.status
+    const versionChip = effectiveStatus
       ? `<span style="background:var(--input-bg);border:1px solid var(--border);border-radius:20px;
                       padding:4px 12px;font-size:12px;color:var(--muted);white-space:nowrap">
-           v${rem.status.version || '?'}
+           v${effectiveStatus.version || '?'}
          </span>` : '';
 
-    const actionBtns = rem.online
-      ? `<button class="btn btn-success btn-sm"
-           onclick="event.stopPropagation();remoteServerAction(${rem.idx},'start')">Start All</button>
-         <button class="btn btn-danger btn-sm"
-           onclick="event.stopPropagation();remoteServerAction(${rem.idx},'stop')">Stop All</button>`
-      : '';
+    // Always show Start All so instances can be restarted even when CasparCG is stopped
+    // (the web UI on the remote is still running even when CasparCG instances are stopped)
+    const actionBtns = `
+      <button class="btn btn-success btn-sm"
+        onclick="event.stopPropagation();remoteServerAction(${rem.idx},'start')">Start All</button>
+      ${rem.online ? `<button class="btn btn-danger btn-sm"
+        onclick="event.stopPropagation();remoteServerAction(${rem.idx},'stop')">Stop All</button>` : ''}`;
 
     html += `
     <div class="remote-section">
@@ -1251,8 +1264,9 @@ function renderRemotes(remotes) {
         </div>
       </div>
       <div class="remote-body ${collapsed ? 'hidden' : ''}" id="rb_${rem.idx}">
-        ${rem.online && rem.status && rem.status.instances.length
-          ? rem.status.instances.map(inst => remoteInstanceCard(rem, inst)).join('')
+        ${effectiveStatus && effectiveStatus.instances.length
+          ? effectiveStatus.instances.map(inst => remoteInstanceCard(rem, inst)).join('')
+            + (!rem.online ? '<div class="remote-offline-msg" style="grid-column:1/-1;margin-top:8px">⚠ Controller offline — showing last known state. Start All will attempt to reconnect.</div>' : '')
           : rem.online
             ? '<div class="remote-offline-msg">No instances configured on this controller.</div>'
             : `<div class="remote-offline-msg">Cannot reach ${rem.url} — check that the controller is running and the URL is correct.</div>`
