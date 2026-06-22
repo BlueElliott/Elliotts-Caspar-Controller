@@ -293,10 +293,10 @@ label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px
 .remote-chevron {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
-  background: rgba(0,188,212,0.12); border: 1px solid rgba(0,188,212,0.3);
-  color: var(--accent); font-size: 13px; transition: transform 0.2s, background 0.2s;
+  background: var(--border); border: 1px solid #555;
+  color: #fff; font-size: 12px; transition: transform 0.2s, background 0.2s;
 }
-.remote-header:hover .remote-chevron { background: rgba(0,188,212,0.25); }
+.remote-header:hover .remote-chevron { background: #555; }
 .remote-header.collapsed .remote-chevron { transform: rotate(-90deg); }
 .remote-body {
   padding: 12px 4px 0;
@@ -350,7 +350,7 @@ def page(title: str, active: str, body: str, extra_js: str = "") -> str:
     cfg = load_config()
     server_name = cfg.get("server_name", "").strip()
     tab_title = f"{title} — {server_name}" if server_name else f"{title} — Elliott's Caspar Controller"
-    name_inline = (f' <span style="color:var(--accent);font-weight:700">— {server_name}</span>') if server_name else ""
+    name_inline = (f' <span style="color:var(--accent);font-weight:600">— {server_name}</span>') if server_name else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -363,7 +363,7 @@ def page(title: str, active: str, body: str, extra_js: str = "") -> str:
 {nav(active, server_name)}
 <div id="toast-container"></div>
 <main class="main">
-<h1 style="margin-bottom:24px">{title}{name_inline}</h1>
+<h1 style="margin-bottom:24px;color:#fff">{title}{name_inline}</h1>
 {body}
 </main>
 <script>{JS_SHARED}{extra_js}</script>
@@ -772,20 +772,27 @@ def api_remotes():
 
     def _fetch(idx: int, remote: dict) -> dict:
         url = remote.get("url", "").rstrip("/")
-        label = remote.get("label", "").strip()
         try:
             r = _requests.get(f"{url}/api/status", timeout=2)
             data = r.json()
-            remote_name = data.get("server_name", "") or label or url
+            server_name = data.get("server_name", "").strip()
+            if not server_name:
+                # Older versions don't return server_name in /api/status — try /api/config
+                try:
+                    cfg_r = _requests.get(f"{url}/api/config", timeout=2)
+                    server_name = cfg_r.json().get("server_name", "").strip()
+                except Exception:
+                    pass
+            display_name = server_name or url
             return {
-                "idx": idx, "url": url, "label": label,
-                "display_name": label or remote_name or url,
+                "idx": idx, "url": url,
+                "display_name": display_name,
                 "online": True, "status": data,
             }
         except Exception:
             return {
-                "idx": idx, "url": url, "label": label,
-                "display_name": label or url,
+                "idx": idx, "url": url,
+                "display_name": url,
                 "online": False, "status": None,
             }
 
@@ -795,6 +802,20 @@ def api_remotes():
         for f in futs:
             results[futs[f]] = f.result()
     return {"remotes": results}
+
+
+@app.get("/api/remote/{idx}/media")
+def api_remote_media_proxy(idx: int):
+    cfg = load_config()
+    remotes = cfg.get("remote_controllers", [])
+    if idx < 0 or idx >= len(remotes):
+        raise HTTPException(status_code=404, detail=f"Remote {idx} not found")
+    url = remotes[idx].get("url", "").rstrip("/")
+    try:
+        r = _requests.get(f"{url}/api/media", timeout=5)
+        return r.json()
+    except Exception:
+        return {"clips": [], "error": "Could not reach remote"}
 
 
 class _RemoteTestRequest(BaseModel):
@@ -1142,20 +1163,34 @@ function toggleRemote(idx) {
 
 function remoteInstanceCard(rem, inst) {
   const isLive = inst.status === 'live';
+  const isMedia = inst.type === 'media';
   const actionBtn = isLive
     ? `<button class="btn btn-danger btn-sm" style="width:100%"
          onclick="remoteInstanceAction(${rem.idx}, ${inst.id}, 'stop')">■ Stop</button>`
     : `<button class="btn btn-success btn-sm" style="width:100%"
          onclick="remoteInstanceAction(${rem.idx}, ${inst.id}, 'restart')">▶ Start</button>`;
+  const mediaRow = isMedia ? `
+    <div style="display:flex;gap:4px;margin-top:4px">
+      <select id="rmedia_${rem.idx}_${inst.id}"
+              style="flex:1;font-size:11px;padding:5px 8px;min-width:0;background:var(--input-bg);color:var(--muted);border:1px solid var(--border);border-radius:6px"
+              onchange="onRemoteMediaSelect(${rem.idx},${inst.id})">
+        <option value="">— pick a clip —</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:4px;margin-top:4px">
+      <input type="text" id="ramcp_${rem.idx}_${inst.id}" placeholder='PLAY 1-1 "CLIP" LOOP'
+             style="flex:1;font-size:11px;padding:5px 8px;min-width:0">
+      <button class="btn btn-secondary btn-sm" style="padding:0 10px;flex-shrink:0"
+              onclick="sendRemoteAmcp(${rem.idx},${inst.id})">Send</button>
+    </div>` : '';
   return `
   <div class="channel-card">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <div class="ch-num">Instance ${inst.id} &nbsp;<span style="color:var(--muted);font-size:10px">:${inst.amcp_port}</span></div>
-    </div>
+    <div class="ch-num">Instance ${inst.id} &nbsp;<span style="color:var(--muted);font-size:10px">:${inst.amcp_port}</span></div>
     <div class="ch-name">${inst.name}</div>
     <div class="ch-ndi">NDI: ${inst.ndi_name}</div>
     <span class="badge ${isLive ? 'badge-success' : 'badge-error'}">${inst.status}</span>
     ${actionBtn}
+    ${mediaRow}
   </div>`;
 }
 
@@ -1182,34 +1217,38 @@ function renderRemotes(remotes) {
 
     const liveChip = rem.online
       ? `<span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);border-radius:20px;
-                      padding:3px 10px;font-size:12px;color:var(--success);white-space:nowrap;font-weight:600">
+                      padding:4px 12px;font-size:13px;color:var(--success);white-space:nowrap;font-weight:600">
            ${liveCount}/${total} live
          </span>` : '';
 
     const versionChip = rem.online && rem.status
       ? `<span style="background:var(--input-bg);border:1px solid var(--border);border-radius:20px;
-                      padding:3px 10px;font-size:11px;color:var(--muted);white-space:nowrap">
+                      padding:4px 12px;font-size:12px;color:var(--muted);white-space:nowrap">
            v${rem.status.version || '?'}
          </span>` : '';
 
-    const actionBtns = rem.online ? `
-      <div style="display:flex;gap:6px;margin-left:auto;flex-shrink:0">
-        <button class="btn btn-success btn-sm"
-          onclick="event.stopPropagation();remoteServerAction(${rem.idx},'start')">Start All</button>
-        <button class="btn btn-danger btn-sm"
-          onclick="event.stopPropagation();remoteServerAction(${rem.idx},'stop')">Stop All</button>
-      </div>` : '<div style="margin-left:auto"></div>';
+    const actionBtns = rem.online
+      ? `<button class="btn btn-success btn-sm"
+           onclick="event.stopPropagation();remoteServerAction(${rem.idx},'start')">Start All</button>
+         <button class="btn btn-danger btn-sm"
+           onclick="event.stopPropagation();remoteServerAction(${rem.idx},'stop')">Stop All</button>`
+      : '';
 
     html += `
     <div class="remote-section">
       <div class="remote-header ${collapsed ? 'collapsed' : ''}" id="rh_${rem.idx}"
-           onclick="toggleRemote(${rem.idx})">
-        <span class="remote-chevron">▼</span>
-        <span style="font-weight:700;font-size:15px;margin-right:4px">${rem.display_name}</span>
-        ${statusBadge}
-        ${liveChip}
-        ${versionChip}
-        ${actionBtns}
+           onclick="toggleRemote(${rem.idx})"
+           style="justify-content:space-between">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1">
+          <span class="remote-chevron">▼</span>
+          <span style="font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${rem.display_name}</span>
+          ${statusBadge}
+          ${liveChip}
+          ${versionChip}
+        </div>
+        <div style="display:flex;gap:8px;flex-shrink:0;margin-left:16px" onclick="event.stopPropagation()">
+          ${actionBtns}
+        </div>
       </div>
       <div class="remote-body ${collapsed ? 'hidden' : ''}" id="rb_${rem.idx}">
         ${rem.online && rem.status && rem.status.instances.length
@@ -1223,6 +1262,10 @@ function renderRemotes(remotes) {
   });
 
   sec.innerHTML = html;
+  // Populate clip dropdowns for media instances on each online remote
+  remotes.forEach(rem => {
+    if (rem && rem.online && rem.status) populateRemoteMediaDropdowns(rem.idx, rem.status.instances);
+  });
 }
 
 function updateRemotes() {
@@ -1240,6 +1283,51 @@ function remoteInstanceAction(idx, instId, action) {
   api('/api/remote/' + idx + '/proxy', 'POST', { path: '/api/instance/' + instId + '/' + action })
     .then(() => { setTimeout(updateRemotes, 2000); updateRemotes(); })
     .catch(() => toast('Remote action failed', 'error'));
+}
+
+const _remoteClips = {};
+function loadRemoteClips(idx) {
+  if (_remoteClips[idx]) return Promise.resolve(_remoteClips[idx]);
+  return api('/api/remote/' + idx + '/media').then(data => {
+    _remoteClips[idx] = data.clips || [];
+    return _remoteClips[idx];
+  });
+}
+
+function populateRemoteMediaDropdowns(idx, instances) {
+  const mediaInsts = instances.filter(i => i.type === 'media');
+  if (!mediaInsts.length) return;
+  loadRemoteClips(idx).then(clips => {
+    const regular = clips.filter(c => !c.startsWith('TEST_'));
+    const tests   = clips.filter(c =>  c.startsWith('TEST_'));
+    mediaInsts.forEach(inst => {
+      const sel = document.getElementById('rmedia_' + idx + '_' + inst.id);
+      if (!sel) return;
+      let html = '<option value="">— pick a clip —</option>';
+      html += regular.map(c => `<option value="${c}">${c}</option>`).join('');
+      if (tests.length) {
+        html += '<option disabled>─── Test Patterns ───</option>';
+        html += tests.map(c => `<option value="${c}">${c}</option>`).join('');
+      }
+      sel.innerHTML = html;
+    });
+  });
+}
+
+function onRemoteMediaSelect(idx, instId) {
+  const clip = document.getElementById('rmedia_' + idx + '_' + instId)?.value;
+  if (!clip) return;
+  const inp = document.getElementById('ramcp_' + idx + '_' + instId);
+  if (inp) inp.value = `PLAY 1-1 "${clip}" LOOP`;
+}
+
+function sendRemoteAmcp(idx, instId) {
+  const input = document.getElementById('ramcp_' + idx + '_' + instId);
+  const cmd = input?.value?.trim();
+  if (!cmd) { toast('Enter an AMCP command first', 'warning'); return; }
+  api('/api/remote/' + idx + '/proxy', 'POST', { path: '/api/instance/' + instId + '/amcp', body: { command: cmd } })
+    .then(d => toast('Remote: ' + (d.response || 'OK'), 'success'))
+    .catch(() => toast('Remote AMCP failed', 'error'));
 }
 
 updateStatus();
