@@ -1521,7 +1521,7 @@ def page_settings():
   <h2 style="margin-bottom:12px">Web UI Password</h2>
   <div style="display:flex;gap:10px;align-items:flex-end">
     <div class="form-group" style="flex:1;margin:0">
-      <label>Password <span style="color:var(--muted);font-size:11px">(leave blank to disable — localhost always bypasses)</span></label>
+      <label>Password <span style="color:var(--muted);font-size:11px">(leave blank to disable — this machine always bypasses, only remote devices are blocked)</span></label>
       <input type="password" id="web_password" placeholder="Leave blank to disable">
     </div>
     <button class="btn btn-primary" onclick="savePassword()" style="flex-shrink:0">Save</button>
@@ -1935,7 +1935,7 @@ _uvicorn_server: Optional[uvicorn.Server] = None
 
 def start_server(port: int = 5280, open_browser: bool = True) -> None:
     global _server_thread, _uvicorn_server
-    cfg_obj = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    cfg_obj = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
     _uvicorn_server = uvicorn.Server(cfg_obj)
 
     def run():
