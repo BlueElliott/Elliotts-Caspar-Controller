@@ -299,7 +299,7 @@ label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px
 .remote-header:hover .remote-chevron { background: #555; }
 .remote-header.collapsed .remote-chevron { transform: rotate(-90deg); }
 .remote-body {
-  padding: 12px 4px 0;
+  padding: 12px 0 0;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 12px;
@@ -350,7 +350,7 @@ def page(title: str, active: str, body: str, extra_js: str = "") -> str:
     cfg = load_config()
     server_name = cfg.get("server_name", "").strip()
     tab_title = f"{title} — {server_name}" if server_name else f"{title} — Elliott's Caspar Controller"
-    name_inline = (f' <span style="color:var(--accent);font-weight:600">— {server_name}</span>') if server_name else ""
+    name_inline = (f' — <span style="color:var(--accent);font-weight:600">{server_name}</span>') if server_name else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
