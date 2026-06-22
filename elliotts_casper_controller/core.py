@@ -350,8 +350,7 @@ def page(title: str, active: str, body: str, extra_js: str = "") -> str:
     cfg = load_config()
     server_name = cfg.get("server_name", "").strip()
     tab_title = f"{title} — {server_name}" if server_name else f"{title} — Elliott's Caspar Controller"
-    subtitle = (f'<p style="color:var(--accent);font-size:16px;font-weight:600;margin-top:6px;margin-bottom:20px;letter-spacing:0.3px">'
-                f'{server_name}</p>') if server_name else '<div style="margin-bottom:24px"></div>'
+    name_inline = (f' <span style="color:var(--accent);font-weight:700">— {server_name}</span>') if server_name else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -364,8 +363,7 @@ def page(title: str, active: str, body: str, extra_js: str = "") -> str:
 {nav(active, server_name)}
 <div id="toast-container"></div>
 <main class="main">
-<h1>{title}</h1>
-{subtitle}
+<h1 style="margin-bottom:24px">{title}{name_inline}</h1>
 {body}
 </main>
 <script>{JS_SHARED}{extra_js}</script>
@@ -1174,38 +1172,43 @@ function renderRemotes(remotes) {
   remotes.forEach(rem => {
     if (!rem) return;
     const collapsed = _isCollapsed(rem.idx);
-    const onlineDot = rem.online
-      ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--success);flex-shrink:0;display:inline-block"></span>'
-      : '<span style="width:8px;height:8px;border-radius:50%;background:var(--error);flex-shrink:0;display:inline-block"></span>';
-    const statusBadge = rem.online
-      ? '<span class="badge badge-success" style="font-size:11px">Online</span>'
-      : '<span class="badge badge-error" style="font-size:11px">Offline</span>';
-
     const liveCount = rem.online && rem.status
       ? rem.status.instances.filter(i => i.status === 'live').length : 0;
     const total = rem.online && rem.status ? rem.status.instances.length : 0;
 
+    const statusBadge = rem.online
+      ? `<span class="badge badge-success" style="font-size:11px;white-space:nowrap">● Online</span>`
+      : `<span class="badge badge-error"   style="font-size:11px;white-space:nowrap">● Offline</span>`;
+
+    const liveChip = rem.online
+      ? `<span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);border-radius:20px;
+                      padding:3px 10px;font-size:12px;color:var(--success);white-space:nowrap;font-weight:600">
+           ${liveCount}/${total} live
+         </span>` : '';
+
+    const versionChip = rem.online && rem.status
+      ? `<span style="background:var(--input-bg);border:1px solid var(--border);border-radius:20px;
+                      padding:3px 10px;font-size:11px;color:var(--muted);white-space:nowrap">
+           v${rem.status.version || '?'}
+         </span>` : '';
+
     const actionBtns = rem.online ? `
-      <div style="display:flex;gap:6px;margin-left:auto">
+      <div style="display:flex;gap:6px;margin-left:auto;flex-shrink:0">
         <button class="btn btn-success btn-sm"
           onclick="event.stopPropagation();remoteServerAction(${rem.idx},'start')">Start All</button>
         <button class="btn btn-danger btn-sm"
           onclick="event.stopPropagation();remoteServerAction(${rem.idx},'stop')">Stop All</button>
-      </div>` : '';
-
-    const versionBadge = rem.online && rem.status
-      ? `<span style="color:var(--muted);font-size:11px">v${rem.status.version || ''}</span>` : '';
+      </div>` : '<div style="margin-left:auto"></div>';
 
     html += `
     <div class="remote-section">
       <div class="remote-header ${collapsed ? 'collapsed' : ''}" id="rh_${rem.idx}"
            onclick="toggleRemote(${rem.idx})">
-        ${onlineDot}
-        <span style="font-weight:700;font-size:15px">${rem.display_name}</span>
-        ${statusBadge}
-        ${rem.online ? `<span style="color:var(--muted);font-size:12px">${liveCount}/${total} live</span>` : ''}
-        ${versionBadge}
         <span class="remote-chevron">▼</span>
+        <span style="font-weight:700;font-size:15px;margin-right:4px">${rem.display_name}</span>
+        ${statusBadge}
+        ${liveChip}
+        ${versionChip}
         ${actionBtns}
       </div>
       <div class="remote-body ${collapsed ? 'hidden' : ''}" id="rb_${rem.idx}">
