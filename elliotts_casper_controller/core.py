@@ -290,9 +290,13 @@ label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px
   user-select: none; transition: border-color 0.2s;
 }
 .remote-header:hover { border-color: var(--accent); }
-.remote-header .remote-chevron {
-  font-size: 11px; color: var(--muted); transition: transform 0.2s; margin-left: 2px;
+.remote-chevron {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
+  background: rgba(0,188,212,0.12); border: 1px solid rgba(0,188,212,0.3);
+  color: var(--accent); font-size: 13px; transition: transform 0.2s, background 0.2s;
 }
+.remote-header:hover .remote-chevron { background: rgba(0,188,212,0.25); }
 .remote-header.collapsed .remote-chevron { transform: rotate(-90deg); }
 .remote-body {
   padding: 12px 4px 0;
@@ -346,7 +350,7 @@ def page(title: str, active: str, body: str, extra_js: str = "") -> str:
     cfg = load_config()
     server_name = cfg.get("server_name", "").strip()
     tab_title = f"{title} — {server_name}" if server_name else f"{title} — Elliott's Caspar Controller"
-    subtitle = (f'<p style="color:var(--muted);font-size:13px;margin-top:4px;margin-bottom:20px">'
+    subtitle = (f'<p style="color:var(--accent);font-size:16px;font-weight:600;margin-top:6px;margin-bottom:20px;letter-spacing:0.3px">'
                 f'{server_name}</p>') if server_name else '<div style="margin-bottom:24px"></div>'
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1409,6 +1413,30 @@ loadData();
 @app.get("/settings", response_class=HTMLResponse)
 def page_settings():
     body = """
+<!-- Server Identity -->
+<div class="card" style="margin-bottom:16px">
+  <h2 style="margin-bottom:16px">Server Identity</h2>
+  <div style="display:flex;gap:10px;align-items:flex-end">
+    <div class="form-group" style="flex:1;margin:0">
+      <label>Server Name <span style="color:var(--muted);font-size:11px">(shown in the nav bar and browser tab)</span></label>
+      <input type="text" id="server_name" placeholder="e.g. GFX PC, Studio A, Backup">
+    </div>
+    <button class="btn btn-primary" onclick="saveServerName()" style="flex-shrink:0">Save</button>
+  </div>
+</div>
+
+<!-- Web UI Password -->
+<div class="card" style="margin-bottom:16px">
+  <h2 style="margin-bottom:12px">Web UI Password</h2>
+  <div style="display:flex;gap:10px;align-items:flex-end">
+    <div class="form-group" style="flex:1;margin:0">
+      <label>Password <span style="color:var(--muted);font-size:11px">(leave blank to disable — localhost always bypasses)</span></label>
+      <input type="password" id="web_password" placeholder="Leave blank to disable">
+    </div>
+    <button class="btn btn-primary" onclick="savePassword()" style="flex-shrink:0">Save</button>
+  </div>
+</div>
+
 <!-- CasparCG Executable -->
 <div class="card" style="margin-bottom:16px" id="exe-card">
   <h2 style="margin-bottom:4px">CasparCG Executable</h2>
@@ -1499,49 +1527,15 @@ def page_settings():
 <div class="card" style="margin-top:16px">
   <h2 style="margin-bottom:8px">Remote Controllers</h2>
   <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
-    Add other Elliott's Caspar Controller instances to monitor and control them from this dashboard.
+    Add other Elliott's Caspar Controller instances to monitor and control from the dashboard.
     Use the full URL including port, e.g. <code>http://192.168.1.101:5280</code>.
-    The optional label overrides the remote's server name in the dashboard.
+    The server name is pulled automatically from each remote.
   </p>
   <div id="remotes-list"></div>
   <div style="display:flex;gap:10px;margin-top:12px">
     <button class="btn btn-primary btn-sm" onclick="addRemote()">+ Add Remote</button>
     <button class="btn btn-primary" onclick="saveRemotes()">Save Remote Controllers</button>
   </div>
-</div>
-
-<!-- Server Identity & Security -->
-<div class="card" style="margin-top:16px">
-  <h2 style="margin-bottom:16px">Server Identity</h2>
-  <div class="form-group">
-    <label>Server Name <span style="color:var(--muted);font-size:11px">(shown in the nav bar and browser tab — useful when running multiple controllers)</span></label>
-    <input type="text" id="server_name" placeholder="e.g. GFX PC, Studio A, Backup">
-  </div>
-</div>
-
-<!-- Web UI Password -->
-<div class="card" style="margin-top:16px">
-  <h2 style="margin-bottom:8px">Web UI Password</h2>
-  <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
-    Restrict access to the web UI from other devices on your network. Connections from this machine (localhost) always bypass the password.
-  </p>
-  <div class="grid-2" style="margin-bottom:12px">
-    <div class="form-group" style="margin:0">
-      <label>Password</label>
-      <input type="password" id="web_password" placeholder="Leave blank to disable">
-    </div>
-    <div class="form-group" style="display:flex;align-items:center;gap:10px;padding-top:22px;margin:0">
-      <input type="checkbox" id="web_password_enabled"
-             style="width:18px;height:18px;flex-shrink:0;accent-color:var(--accent);cursor:pointer">
-      <label for="web_password_enabled" style="margin:0;color:var(--text);cursor:pointer">
-        Enable password protection
-      </label>
-    </div>
-  </div>
-  <button class="btn btn-primary" onclick="saveIdentityAndSecurity()">Save</button>
-  <p style="color:var(--muted);font-size:12px;margin-top:10px">
-    Changes take effect immediately. Existing sessions remain active until the app restarts.
-  </p>
 </div>
 
 <!-- Config Import / Export -->
@@ -1571,9 +1565,6 @@ function renderRemoteList() {
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
       <input type="text" id="remote_url_${i}" value="${(r.url||'').replace(/"/g,'&quot;')}"
              placeholder="http://192.168.1.101:5280"
-             style="flex:2;min-width:0">
-      <input type="text" id="remote_label_${i}" value="${(r.label||'').replace(/"/g,'&quot;')}"
-             placeholder="Label (optional)"
              style="flex:1;min-width:0">
       <button class="btn btn-secondary btn-sm" onclick="testRemote(${i})" title="Test connection">Test</button>
       <button class="btn btn-danger btn-sm" style="flex-shrink:0"
@@ -1595,8 +1586,7 @@ function removeRemote(i) {
 
 function getFormRemotes() {
   return _remotes.map((_, i) => ({
-    url:   (document.getElementById('remote_url_'   + i)?.value || '').trim(),
-    label: (document.getElementById('remote_label_' + i)?.value || '').trim(),
+    url: (document.getElementById('remote_url_' + i)?.value || '').trim(),
   })).filter(r => r.url);
 }
 
@@ -1633,7 +1623,6 @@ function loadSettings() {
     document.getElementById('media_path').value = cfg.media_path || '';
     document.getElementById('server_name').value = cfg.server_name || '';
     document.getElementById('web_password').value = cfg.web_password || '';
-    document.getElementById('web_password_enabled').checked = !!cfg.web_password_enabled;
     _remotes = (cfg.remote_controllers || []);
     renderRemoteList();
     currentInstances = (cfg.instances || []).map(inst => ({
@@ -1787,14 +1776,17 @@ function saveSettings() {
   }).catch(() => toast('Failed to save settings', 'error'));
 }
 
-function saveIdentityAndSecurity() {
-  const payload = {
-    server_name:          document.getElementById('server_name').value.trim(),
-    web_password:         document.getElementById('web_password').value,
-    web_password_enabled: document.getElementById('web_password_enabled').checked,
-  };
-  api('/api/config', 'POST', payload)
-    .then(() => { toast('Identity & security saved', 'success'); location.reload(); })
+function saveServerName() {
+  const name = document.getElementById('server_name').value.trim();
+  api('/api/config', 'POST', { server_name: name })
+    .then(() => { toast('Server name saved', 'success'); location.reload(); })
+    .catch(() => toast('Failed to save', 'error'));
+}
+
+function savePassword() {
+  const pw = document.getElementById('web_password').value;
+  api('/api/config', 'POST', { web_password: pw, web_password_enabled: pw.length > 0 })
+    .then(() => toast(pw ? 'Password set' : 'Password disabled', 'success'))
     .catch(() => toast('Failed to save', 'error'));
 }
 
