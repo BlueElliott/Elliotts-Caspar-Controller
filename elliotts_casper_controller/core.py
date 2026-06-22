@@ -23,6 +23,7 @@ from elliotts_casper_controller.config_manager import (
     ensure_test_pattern_images,
 )
 from elliotts_casper_controller.process_manager import CasparProcessManager
+from elliotts_casper_controller import ndi_tally
 
 # ---------------------------------------------------------------------------
 # State
@@ -70,11 +71,20 @@ def _load_instance(inst: dict, client: AMCPClient) -> str:
 # App
 # ---------------------------------------------------------------------------
 
+def _refresh_tally_monitors():
+    """Start/stop tally monitors to match current instance config."""
+    cfg = load_config()
+    ndi_names = [i["ndi_name"] for i in cfg.get("instances", []) if i.get("ndi_name")]
+    ndi_tally.start_monitoring(ndi_names)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _config
     _config = load_config()
+    _refresh_tally_monitors()
     yield
+    ndi_tally.stop_all()
 
 
 app = FastAPI(title="Elliott's Caspar Controller", version=__version__, lifespan=lifespan)
@@ -282,6 +292,30 @@ label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px
 .mv-label { padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
 .mv-label span { font-size: 13px; font-weight: 600; }
 
+/* TALLY */
+.tally-program {
+  border-color: var(--error) !important;
+  box-shadow: 0 0 0 3px rgba(239,68,68,0.25), 0 0 16px rgba(239,68,68,0.15) !important;
+}
+.tally-preview {
+  border-color: var(--warning) !important;
+  box-shadow: 0 0 0 3px rgba(245,158,11,0.25) !important;
+}
+.tally-badge-program {
+  display:inline-flex; align-items:center; gap:4px;
+  background:var(--error); color:#fff; border-radius:20px;
+  padding:2px 8px; font-size:10px; font-weight:700; letter-spacing:.5px;
+  animation: tally-pulse 1s infinite;
+}
+.tally-badge-preview {
+  display:inline-flex; align-items:center; gap:4px;
+  background:var(--warning); color:#000; border-radius:20px;
+  padding:2px 8px; font-size:10px; font-weight:700;
+}
+@keyframes tally-pulse {
+  0%,100% { opacity:1; } 50% { opacity:0.6; }
+}
+
 /* REMOTE CONTROLLER SECTIONS */
 .remote-section { margin-bottom: 12px; }
 .remote-header {
@@ -452,6 +486,13 @@ def api_status():
             "amcp_port": port,
             "status": "live" if running else "stopped",
         })
+    # Merge tally state into each instance
+    tally = ndi_tally.get_tally()
+    for inst in instances_out:
+        t = tally.get(inst["ndi_name"], {})
+        inst["on_program"] = t.get("program", False)
+        inst["on_preview"] = t.get("preview", False)
+
     any_running = any(i["status"] == "live" for i in instances_out)
     needs_setup = not cfg.get("caspar_exe_path") or not instances
     return {
@@ -460,6 +501,7 @@ def api_status():
         "instances": instances_out,
         "needs_setup": needs_setup,
         "server_name": cfg.get("server_name", ""),
+        "tally_available": ndi_tally.is_available(),
     }
 
 
@@ -733,6 +775,7 @@ def api_config_post(update: ConfigUpdate):
     cfg.update(data)
     save_config(cfg)
     regenerate_all_instance_configs(cfg)
+    _refresh_tally_monitors()
     _log_event("Config saved and instance configs regenerated.")
     return {"ok": True}
 
@@ -924,6 +967,14 @@ def api_log():
         return {"log": list(_log)}
 
 
+@app.get("/api/tally")
+def api_tally():
+    return {
+        "available": ndi_tally.is_available(),
+        "tally": ndi_tally.get_tally(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
@@ -1000,6 +1051,14 @@ function renderInstances(instances) {
     const typeBadge = isHtml
       ? '<span class="badge badge-neutral" style="font-size:10px">HTML5</span>'
       : '<span class="badge badge-warning" style="font-size:10px">Media</span>';
+
+    const tallyClass = inst.on_program ? 'tally-program' : inst.on_preview ? 'tally-preview' : '';
+    const tallyBadge = inst.on_program
+      ? '<span class="tally-badge-program">● LIVE</span>'
+      : inst.on_preview
+        ? '<span class="tally-badge-preview">◐ PVW</span>'
+        : '';
+
     const sourceInfo = '';
     const loadUrl = '';
     const amcpRow = !isHtml ? `
@@ -1017,10 +1076,10 @@ function renderInstances(instances) {
                 onclick="sendAmcp(${inst.id})">Send</button>
       </div>` : '';
     return `
-    <div class="channel-card">
+    <div class="channel-card ${tallyClass}">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div class="ch-num">Instance ${inst.id} &nbsp;<span style="color:var(--muted);font-size:10px">:${inst.amcp_port}</span></div>
-        ${typeBadge}
+        <div style="display:flex;gap:4px;align-items:center">${tallyBadge}${typeBadge}</div>
       </div>
       <div class="ch-name">${inst.name}</div>
       <div class="ch-ndi">NDI: ${inst.ndi_name}</div>
@@ -1172,6 +1231,10 @@ function toggleRemote(idx) {
 function remoteInstanceCard(rem, inst) {
   const isLive = inst.status === 'live';
   const isMedia = inst.type === 'media';
+  const tallyClass = inst.on_program ? 'tally-program' : inst.on_preview ? 'tally-preview' : '';
+  const tallyBadge = inst.on_program
+    ? '<span class="tally-badge-program">● LIVE</span>'
+    : inst.on_preview ? '<span class="tally-badge-preview">◐ PVW</span>' : '';
   const actionBtn = isLive
     ? `<button class="btn btn-danger btn-sm" style="width:100%"
          onclick="remoteInstanceAction(${rem.idx}, ${inst.id}, 'stop')">■ Stop</button>`
@@ -1192,8 +1255,11 @@ function remoteInstanceCard(rem, inst) {
               onclick="sendRemoteAmcp(${rem.idx},${inst.id})">Send</button>
     </div>` : '';
   return `
-  <div class="channel-card">
-    <div class="ch-num">Instance ${inst.id} &nbsp;<span style="color:var(--muted);font-size:10px">:${inst.amcp_port}</span></div>
+  <div class="channel-card ${tallyClass}">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div class="ch-num">Instance ${inst.id} &nbsp;<span style="color:var(--muted);font-size:10px">:${inst.amcp_port}</span></div>
+      ${tallyBadge}
+    </div>
     <div class="ch-name">${inst.name}</div>
     <div class="ch-ndi">NDI: ${inst.ndi_name}</div>
     <span class="badge ${isLive ? 'badge-success' : 'badge-error'}">${inst.status}</span>

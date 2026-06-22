@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elliotts-casper-controller"
-version = "1.0.8"
+version = "1.0.9"
 description = "Elliott's Caspar Controller - Desktop app and web UI for managing CasparCG with NDI outputs"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -41,6 +41,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ndi = [
+    "ndi-python>=0.0.7",
+    "numpy>=1.24.0",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
