@@ -32,6 +32,9 @@ class AMCPClient:
         response = self.send("VERSION")
         return response.startswith("201")
 
+    def info_layer(self, channel: int = 1, layer: int = 1) -> str:
+        return self.send(f"INFO {channel}-{layer}")
+
     def play_html(self, channel: int, url: str) -> str:
         return self.send(f'PLAY {channel}-1 [HTML] "{url}"')
 

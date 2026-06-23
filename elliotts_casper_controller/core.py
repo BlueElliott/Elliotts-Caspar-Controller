@@ -1,8 +1,10 @@
 """FastAPI application — web UI and REST API for Elliott's Caspar Controller."""
+import os as _os
 import secrets
 import threading
 import time
 import webbrowser
+import xml.etree.ElementTree as _ET
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -83,18 +85,73 @@ def _refresh_tally_monitors():
     ndi_tally.start_monitoring(ndi_names)
 
 
+def _parse_layer_info(raw: str) -> dict:
+    """Parse the raw AMCP INFO 1-1 response into a layer info dict."""
+    empty: dict = {"clip": None, "time": 0.0, "duration": 0.0, "loop": False, "producer": "empty"}
+    try:
+        nl = raw.find("\n")
+        if nl < 0 or not raw.startswith("201"):
+            return empty
+        xml_str = raw[nl + 1:].strip()
+        if not xml_str:
+            return empty
+        root = _ET.fromstring(xml_str)
+        fg = root.find(".//foreground/producer")
+        if fg is None:
+            return empty
+        ptype = fg.get("type", "")
+        if "empty" in ptype.lower():
+            return empty
+
+        fn_el = fg.find("filename")
+        clip = None
+        if fn_el is not None and fn_el.text:
+            clip = _os.path.basename(fn_el.text.replace("\\", "/"))
+            # Strip numeric suffix CasparCG sometimes appends (e.g. "clip.mp4_0")
+            if clip and "_" in clip:
+                stem, _, tail = clip.rpartition("_")
+                if tail.isdigit():
+                    clip = stem
+
+        def _f(tag: str) -> float:
+            el = fg.find(tag)
+            try:
+                return float(el.text) if el is not None and el.text else 0.0
+            except ValueError:
+                return 0.0
+
+        loop_el = fg.find("loop")
+        loop = (loop_el.text or "0").strip() not in ("0", "false", "False") if loop_el is not None else False
+
+        return {
+            "clip": clip,
+            "time": round(_f("time"), 2),
+            "duration": round(_f("duration"), 2),
+            "loop": loop,
+            "producer": ptype,
+        }
+    except Exception:
+        return empty
+
+
 def _background_status_worker():
-    """Refresh AMCP ping state in background so /api/status returns from cache."""
+    """Refresh AMCP state in background so /api/status returns from cache."""
     while not _status_refresh_stop.is_set():
         try:
             cfg = load_config()
             instances = cfg.get("instances", [])
             live: dict = {}
+            layer_info: dict = {}
 
-            def _ping(inst):
-                live[inst["id"]] = AMCPClient(port=instance_amcp_port(cfg, inst), timeout=1.0).ping()
+            def _fetch(inst):
+                client = AMCPClient(port=instance_amcp_port(cfg, inst), timeout=1.0)
+                raw = client.info_layer()
+                is_live = raw.startswith("201")
+                live[inst["id"]] = is_live
+                layer_info[inst["id"]] = _parse_layer_info(raw) if is_live else \
+                    {"clip": None, "time": 0.0, "duration": 0.0, "loop": False, "producer": "empty"}
 
-            threads = [threading.Thread(target=_ping, args=(inst,), daemon=True) for inst in instances]
+            threads = [threading.Thread(target=_fetch, args=(inst,), daemon=True) for inst in instances]
             for t in threads:
                 t.start()
             for t in threads:
@@ -102,6 +159,7 @@ def _background_status_worker():
 
             with _status_lock:
                 _status_cache["live"] = live
+                _status_cache["layer_info"] = layer_info
                 _status_cache["ts"] = time.time()
         except Exception:
             pass
@@ -306,6 +364,10 @@ label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px
 }
 .channel-card .ch-name { font-size: 18px; font-weight: 700; }
 .channel-card .ch-ndi  { font-size: 12px; color: var(--muted); }
+.clip-info { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.clip-info .clip-name { color: var(--text); font-weight: 600; }
+.clip-progress { width: 100%; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 2px; }
+.clip-progress-bar { height: 100%; background: var(--accent); border-radius: 2px; transition: width 1s linear; }
 
 /* PULSE */
 .pulse { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
@@ -499,11 +561,13 @@ def api_status():
     # Read from background cache — returns in <1ms rather than blocking on AMCP pings
     with _status_lock:
         live = dict(_status_cache["live"])
+        layer_info = dict(_status_cache.get("layer_info", {}))
 
     instances_out = []
     for inst in instances:
         port = instance_amcp_port(cfg, inst)
         running = live.get(inst["id"], False)
+        li = layer_info.get(inst["id"], {})
         instances_out.append({
             "id": inst["id"],
             "name": inst["name"],
@@ -513,6 +577,7 @@ def api_status():
             "startup_command": inst.get("startup_command", ""),
             "amcp_port": port,
             "status": "live" if running else "stopped",
+            "layer": li,
         })
     # Merge tally state into each instance
     tally = ndi_tally.get_tally()
@@ -1087,7 +1152,27 @@ function renderInstances(instances) {
         ? '<span class="tally-badge-preview">◐ PVW</span>'
         : '';
 
-    const sourceInfo = '';
+    const li = inst.layer || {};
+    const layerHtml = (() => {
+      if (inst.status !== 'live' || !li.clip) return '';
+      const fmtTime = s => {
+        s = Math.max(0, Math.floor(s));
+        const m = Math.floor(s / 60), sec = s % 60;
+        return `${m}:${String(sec).padStart(2,'0')}`;
+      };
+      const pct = li.duration > 0 ? Math.min(100, (li.time / li.duration) * 100) : 0;
+      const remaining = li.duration > 0 ? li.duration - li.time : 0;
+      const timeLabel = li.loop
+        ? `<span title="Looping">↻ ${fmtTime(li.time)}</span>`
+        : li.duration > 0
+          ? `${fmtTime(li.time)} / ${fmtTime(li.duration)} &nbsp;<span style="color:var(--error)">-${fmtTime(remaining)}</span>`
+          : `${fmtTime(li.time)}`;
+      const bar = li.duration > 0 && !li.loop
+        ? `<div class="clip-progress"><div class="clip-progress-bar" style="width:${pct.toFixed(1)}%"></div></div>`
+        : '';
+      return `<div class="clip-info"><span class="clip-name">${li.clip}</span> &nbsp;${timeLabel}</div>${bar}`;
+    })();
+    const sourceInfo = layerHtml;
     const loadUrl = '';
     const amcpRow = !isHtml ? `
       <div style="display:flex;gap:4px;margin-top:4px">
