@@ -4,7 +4,7 @@ import time
 
 
 class AMCPClient:
-    def __init__(self, host: str = "127.0.0.1", port: int = 5250, timeout: float = 3.0):
+    def __init__(self, host: str = "127.0.0.1", port: int = 5250, timeout: float = 1.5):
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -13,7 +13,7 @@ class AMCPClient:
         try:
             with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
                 sock.sendall((command + "\r\n").encode())
-                time.sleep(0.3)
+                time.sleep(0.05)
                 response = b""
                 sock.settimeout(0.5)
                 try:

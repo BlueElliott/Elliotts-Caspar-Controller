@@ -36,6 +36,11 @@ _log_lock = threading.Lock()
 _sessions: set = set()  # active session tokens for web UI auth
 _remote_name_cache: dict = {}  # url -> last known server_name for offline display
 
+# Background status cache — refreshed every 2s so /api/status returns instantly
+_status_cache: dict = {"live": {}, "ts": 0.0}
+_status_lock = threading.Lock()
+_status_refresh_stop = threading.Event()
+
 MAX_LOG = 200
 
 
@@ -78,12 +83,41 @@ def _refresh_tally_monitors():
     ndi_tally.start_monitoring(ndi_names)
 
 
+def _background_status_worker():
+    """Refresh AMCP ping state in background so /api/status returns from cache."""
+    while not _status_refresh_stop.is_set():
+        try:
+            cfg = load_config()
+            instances = cfg.get("instances", [])
+            live: dict = {}
+
+            def _ping(inst):
+                live[inst["id"]] = AMCPClient(port=instance_amcp_port(cfg, inst), timeout=1.0).ping()
+
+            threads = [threading.Thread(target=_ping, args=(inst,), daemon=True) for inst in instances]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=1.5)
+
+            with _status_lock:
+                _status_cache["live"] = live
+                _status_cache["ts"] = time.time()
+        except Exception:
+            pass
+        _status_refresh_stop.wait(2)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _config
     _config = load_config()
     _refresh_tally_monitors()
+    _status_refresh_stop.clear()
+    t = threading.Thread(target=_background_status_worker, daemon=True, name="status-refresh")
+    t.start()
     yield
+    _status_refresh_stop.set()
     ndi_tally.stop_all()
 
 
@@ -462,15 +496,9 @@ def api_status():
     cfg = load_config()
     instances = cfg.get("instances", [])
 
-    # Ping all instances in parallel so response time = slowest single ping, not sum
-    live = {}
-    def _ping(inst):
-        live[inst["id"]] = AMCPClient(port=instance_amcp_port(cfg, inst)).ping()
-    threads = [threading.Thread(target=_ping, args=(inst,), daemon=True) for inst in instances]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=3)
+    # Read from background cache — returns in <1ms rather than blocking on AMCP pings
+    with _status_lock:
+        live = dict(_status_cache["live"])
 
     instances_out = []
     for inst in instances:
@@ -1412,8 +1440,8 @@ function sendRemoteAmcp(idx, instId) {
 
 updateStatus();
 updateRemotes();
-setInterval(updateStatus, 4000);
-setInterval(updateRemotes, 5000);
+setInterval(updateStatus, 2000);
+setInterval(updateRemotes, 3000);
 """
     return HTMLResponse(page("Dashboard", "dashboard", body, js))
 
