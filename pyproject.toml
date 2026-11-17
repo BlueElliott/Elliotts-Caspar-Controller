@@ -41,7 +41,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ndi = [
-    "ndi-python>=0.0.7",
+    "ndi-python==6.3.2.6",  # pinned: its names change between releases, and tally relies on them
     "numpy>=1.24.0",
 ]
 dev = [

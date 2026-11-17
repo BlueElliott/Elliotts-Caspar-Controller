@@ -13,6 +13,7 @@ from pathlib import Path
 
 import psutil
 import pytest
+from fake_ndi import FakeNDI
 from fastapi.testclient import TestClient
 
 from caspar_controller import instances, log, remotes, settings, tally
@@ -64,6 +65,17 @@ def no_ndi(monkeypatch):
     """Behave as if ndi-python isn't installed, whatever the environment."""
     monkeypatch.setattr(tally, "is_available", lambda: False)
     monkeypatch.setattr(tally, "refresh_monitors", lambda: None)
+
+
+@pytest.fixture
+def fake_ndi(monkeypatch):
+    """Tally talks to a FakeNDI that has found its source; queue frames, then run a session."""
+    fake = FakeNDI()
+    monkeypatch.setattr(tally, "ndi", fake)
+    monkeypatch.setattr(tally, "_find_source", lambda name, stop: "source")
+    monkeypatch.setattr(tally, "_tally", {})
+    monkeypatch.setattr(tally, "_failing", set())
+    return fake
 
 
 @pytest.fixture(autouse=True)

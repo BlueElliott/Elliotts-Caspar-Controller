@@ -16,6 +16,7 @@ Dependencies:
 Silently no-ops if ndi-python is not installed or the NDI Runtime is missing.
 """
 
+import logging
 import os
 import socket
 import threading
@@ -25,6 +26,8 @@ from typing import Dict
 
 from caspar_controller.log import log_event
 from caspar_controller.settings import load as load_config
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # NDI Runtime path hint — the runtime DLL ships with CasparCG / NDI Tools.
@@ -85,6 +88,7 @@ def is_our_source(source_name: str, ndi_name: str) -> bool:
 
 
 _not_found: set = set()  # NDI names already reported missing, so the retry loop doesn't spam
+_failing: set = set()  # NDI names whose session error is already logged, likewise
 
 
 def _find_source(ndi_name: str, stop: threading.Event):
@@ -114,54 +118,49 @@ def _find_source(ndi_name: str, stop: threading.Event):
     return source
 
 
-def _run_session(ndi_name: str, stop: threading.Event):
+def _read_tally(ndi_name: str, xml: str) -> None:
+    """Record the program/preview state from an <ndi_tally_echo> metadata message."""
+    if "tally" not in xml.lower():
+        return
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        log.warning("Tally: unreadable metadata from %s: %.200s", ndi_name, xml)
+        return
+    if "tally" in root.tag.lower():
+        prog = root.get("on_program", "false").lower() == "true"
+        prev = root.get("on_preview", "false").lower() == "true"
+        with _lock:
+            _tally[ndi_name] = {"program": prog, "preview": prev}
+
+
+def _run_session(ndi_name: str, stop: threading.Event) -> None:
     """One connection attempt: find source, connect, read metadata until stop."""
     source = _find_source(ndi_name, stop)
     if not source or stop.is_set():
         return
 
     recv_create = ndi.RecvCreateV3()
-    try:
-        # Metadata-only mode — zero video/audio bandwidth
-        recv_create.bandwidth = ndi.RecvBandwidth.METADATA_ONLY
-    except AttributeError:
-        try:
-            recv_create.bandwidth = -10  # METADATA_ONLY constant value in some builds
-        except Exception:
-            pass
+    recv_create.bandwidth = ndi.RECV_BANDWIDTH_METADATA_ONLY  # the default pulls full video
     recv_create.allow_video_fields = False
     recv_create.ndi_recv_name = "Caspar Controller Tally"
 
     recv = ndi.recv_create_v3(recv_create)
     if not recv:
         return
-    ndi.recv_connect(recv, source)
-
-    while not stop.is_set():
-        try:
-            result = ndi.recv_capture_v3(recv, 500)
-            # recv_capture_v3 returns (frame_type, video, audio, metadata)
-            metadata_frame = result[3] if len(result) > 3 else None
-
-            if metadata_frame is not None:
-                try:
-                    xml_str = getattr(metadata_frame, "data", None) or ""
-                    if xml_str and "tally" in xml_str.lower():
-                        root = ET.fromstring(xml_str)
-                        if "tally" in root.tag.lower():
-                            prog = root.get("on_program", "false").lower() == "true"
-                            prev = root.get("on_preview", "false").lower() == "true"
-                            with _lock:
-                                _tally[ndi_name] = {"program": prog, "preview": prev}
-                except Exception:
-                    pass
-        except Exception:
-            break
-
     try:
+        ndi.recv_connect(recv, source)
+        while not stop.is_set():
+            # Metadata only here too, so no video or audio frame can pile up unfreed.
+            frame_type, _, _, metadata = ndi.recv_capture_v3(
+                recv, 500, want_video=False, want_audio=False
+            )
+            if frame_type == ndi.FRAME_TYPE_METADATA:
+                xml = metadata.data
+                ndi.recv_free_metadata(recv, metadata)
+                _read_tally(ndi_name, xml)
+    finally:
         ndi.recv_destroy(recv)
-    except Exception:
-        pass
 
 
 def _monitor_loop(ndi_name: str, stop: threading.Event):
@@ -169,8 +168,11 @@ def _monitor_loop(ndi_name: str, stop: threading.Event):
     while not stop.is_set():
         try:
             _run_session(ndi_name, stop)
+            _failing.discard(ndi_name)
         except Exception:
-            pass
+            if ndi_name not in _failing:
+                _failing.add(ndi_name)
+                log.exception("Tally for %s failed; retrying every 10 s", ndi_name)
         if not stop.is_set():
             # Source not found or connection dropped — wait then retry
             stop.wait(10)

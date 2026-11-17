@@ -251,6 +251,32 @@ def test_tally_accepts_the_netbios_name(monkeypatch):
     assert tally.is_our_source("GALLERY-PLAYOUT (PCR3 GFX1)", "PCR3 GFX1")
 
 
+def test_tally_receiver_is_metadata_only(fake_ndi):
+    # #49: a wrong enum name left it at full bandwidth, leaking every video frame.
+    fake_ndi.frames = ['<ndi_tally_echo on_program="false" on_preview="false"/>']
+    tally._run_session("PCR3 GFX1", fake_ndi.stop)
+    assert [r.bandwidth for r in fake_ndi.receivers] == [fake_ndi.RECV_BANDWIDTH_METADATA_ONLY]
+    assert set(fake_ndi.captures) == {(False, False)}
+
+
+def test_tally_frees_every_frame_and_reads_the_echo(fake_ndi):
+    echo = '<ndi_tally_echo on_program="true" on_preview="false"/>'
+    fake_ndi.frames = ['<ndi_product long_name="CasparCG"/>', echo]
+    tally._run_session("PCR3 GFX1", fake_ndi.stop)
+    assert fake_ndi.freed == ['<ndi_product long_name="CasparCG"/>', echo]
+    assert fake_ndi.destroyed == 1
+    assert tally.get_tally() == {"PCR3 GFX1": {"program": True, "preview": False}}
+
+
+def test_tally_session_errors_are_logged(fake_ndi, caplog):
+    fake_ndi.connect_error = RuntimeError("NDI went away")
+    fake_ndi.stop.wait = lambda timeout: fake_ndi.stop.set()  # no 10 s retry wait
+    tally._monitor_loop("PCR3 GFX1", fake_ndi.stop)
+    assert "Tally for PCR3 GFX1 failed" in caplog.text
+    assert "NDI went away" in caplog.text
+    assert fake_ndi.destroyed == 1
+
+
 def test_html_outputs_are_not_asked_for_clip_info(write_config):
     with FakeAMCPServer() as s:
         write_config({"instances": [instance(1, "GFX1", amcp_port=s.port)]})
